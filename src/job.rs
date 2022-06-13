@@ -6,7 +6,7 @@ use serde::{Serialize, Deserialize, Serializer, Deserializer};
 use serde::de::Error;
 use serde::ser::SerializeMap;
 
-use chrono::{DateTime, UTC, NaiveDateTime};
+use chrono::{DateTime, Utc, NaiveDateTime};
 
 #[derive(Debug, Clone)]
 pub enum BoolOrUSize {
@@ -19,11 +19,11 @@ pub struct Job {
     pub class: String,
     pub jid: String,
     pub args: Vec<JValue>,
-    pub created_at: Option<DateTime<UTC>>,
-    pub enqueued_at: DateTime<UTC>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub enqueued_at: DateTime<Utc>,
     pub queue: String,
     pub retry: BoolOrUSize,
-    pub at: Option<DateTime<UTC>>, // when scheduled
+    pub at: Option<DateTime<Utc>>, // when scheduled
     pub namespace: String,
     pub retry_info: Option<RetryInfo>,
     pub extra: BTreeMap<String, JValue>,
@@ -43,9 +43,9 @@ impl Job {
     }
 }
 
-impl Deserialize for Job {
+impl<'de> Deserialize<'de> for Job {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where D: Deserializer
+        where D: Deserializer<'de>
     {
         let j = <JValue as Deserialize>::deserialize(deserializer)?;
         if let JValue::Object(mut obj) = j {
@@ -66,23 +66,24 @@ impl Deserialize for Job {
             let enqueued_at = JMapExt::<D>::remove_datetime(&mut obj, "enqueued_at")?;
             let at = JMapExt::<D>::remove_datetime(&mut obj, "at").ok();
 
-            let retry_info = hado! {
-                    retry_count <- JMapExt::<D>::remove_usize(&mut obj, "retry_count").ok();
-                    error_message <- JMapExt::<D>::remove_string(&mut obj, "error_message").ok();
-                    error_class <- JMapExt::<D>::remove_string(&mut obj, "error_class").ok();
-                    error_backtrace <- JMapExt::<D>::remove_svec(&mut obj, "error_backtrace").ok();
-                    failed_at <- JMapExt::<D>::remove_datetime(&mut obj, "failed_at").ok();
-                    retried_at <- Some(JMapExt::<D>::remove_datetime(&mut obj, "retried_at").ok());
-
-                    Some(RetryInfo {
-                        retry_count: retry_count,
-                        error_message: error_message.clone(),
-                        error_class: error_class.clone(),
-                        error_backtrace: error_backtrace.clone(),
-                        failed_at: failed_at,
-                        retried_at: retried_at,
-                    })
-                };
+            let retry_count = JMapExt::<D>::remove_usize(&mut obj, "retry_count");
+            let error_message = JMapExt::<D>::remove_string(&mut obj, "error_message");
+            let error_class = JMapExt::<D>::remove_string(&mut obj, "error_class");
+            let error_backtrace = JMapExt::<D>::remove_svec(&mut obj, "error_backtrace");
+            let failed_at = JMapExt::<D>::remove_datetime(&mut obj, "failed_at");
+            let retried_at = JMapExt::<D>::remove_datetime(&mut obj, "retried_at");
+            let retry_info = if retry_count.is_ok() && error_message.is_ok() && error_class.is_ok() && error_backtrace.is_ok() && failed_at.is_ok() {
+                Some(RetryInfo {
+                    retry_count: retry_count.unwrap(),
+                    error_message: error_message.unwrap().clone(),
+                    error_class: error_class.unwrap().clone(),
+                    error_backtrace: error_backtrace.unwrap().clone(),
+                    failed_at: failed_at.unwrap(),
+                    retried_at: retried_at.ok(),
+                })
+            } else {
+                None
+            };
 
             Ok(Job {
                 class: class,
@@ -171,28 +172,28 @@ pub struct RetryInfo {
     pub error_message: String,
     pub error_class: String,
     pub error_backtrace: Vec<String>,
-    pub failed_at: DateTime<UTC>,
-    pub retried_at: Option<DateTime<UTC>>,
+    pub failed_at: DateTime<Utc>,
+    pub retried_at: Option<DateTime<Utc>>,
 }
 
-trait JMapExt<D>
-    where D: Deserializer
+trait JMapExt<'a, D>
+    where D: Deserializer<'a>
 {
-    fn remove_datetime(&mut self, key: &str) -> Result<DateTime<UTC>, D::Error>;
+    fn remove_datetime(&mut self, key: &str) -> Result<DateTime<Utc>, D::Error>;
     fn remove_string(&mut self, key: &str) -> Result<String, D::Error>;
     fn remove_vec(&mut self, key: &str) -> Result<Vec<JValue>, D::Error>;
     fn remove_svec(&mut self, key: &str) -> Result<Vec<String>, D::Error>;
     fn remove_usize(&mut self, key: &str) -> Result<usize, D::Error>;
 }
 
-impl<D> JMapExt<D> for JMap<String, JValue>
-    where D: Deserializer
+impl<'a, D> JMapExt<'a, D> for JMap<String, JValue>
+    where D: Deserializer<'a>
 {
-    fn remove_datetime(&mut self, key: &str) -> Result<DateTime<UTC>, D::Error> {
+    fn remove_datetime(&mut self, key: &str) -> Result<DateTime<Utc>, D::Error> {
         self.remove(key)
             .and_then(|v| v.as_f64())
             .map(|f| NaiveDateTime::from_timestamp(f as i64, ((f - f.floor()) * 1e9) as u32))
-            .map(|t| DateTime::from_utc(t, UTC))
+            .map(|t| DateTime::from_utc(t, Utc))
             .ok_or(D::Error::custom(format!("no member '{}'", key)))
     }
 

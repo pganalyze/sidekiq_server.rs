@@ -1,17 +1,19 @@
 use serde_json::to_string;
-use chrono::UTC;
+use chrono::Utc;
+use redis::Commands;
 
-use RedisPool;
-use JobSuccessType;
-use errors::Result;
-use job::{Job, RetryInfo};
+use crate::RedisPool;
+use crate::JobSuccessType;
+use crate::errors::Result;
+use crate::job::{Job, RetryInfo};
+
 
 pub type MiddleWareResult = Result<JobSuccessType>;
-pub type NextFunc<'a> = &'a mut (FnMut(&mut Job, RedisPool) -> MiddleWareResult + 'a);
+pub type NextFunc<'a> = &'a mut (dyn FnMut(&mut Job, RedisPool) -> MiddleWareResult + 'a);
 
 pub trait MiddleWare: Send {
     fn handle(&mut self, job: &mut Job, redis: RedisPool, next: NextFunc) -> MiddleWareResult;
-    fn cloned(&mut self) -> Box<MiddleWare>;
+    fn cloned(&mut self) -> Box<dyn MiddleWare>;
 }
 
 impl<F> MiddleWare for F
@@ -20,22 +22,21 @@ impl<F> MiddleWare for F
     fn handle(&mut self, job: &mut Job, redis: RedisPool, next: NextFunc) -> MiddleWareResult {
         self(job, redis, next)
     }
-    fn cloned(&mut self) -> Box<MiddleWare> {
+    fn cloned(&mut self) -> Box<dyn MiddleWare> {
         Box::new(*self)
     }
 }
 
-pub fn peek_middleware(job: &mut Job, redis: RedisPool, mut next: NextFunc) -> MiddleWareResult {
+pub fn peek_middleware(job: &mut Job, redis: RedisPool, next: NextFunc) -> MiddleWareResult {
     println!("Before Call {:?}", job);
     let r = next(job, redis);
     println!("After Call {:?}", job);
     r
 }
 
-pub fn retry_middleware(job: &mut Job, redis: RedisPool, mut next: NextFunc) -> MiddleWareResult {
-    use redis::Commands;
-    use job::BoolOrUSize::*;
-    let conn = redis.get().unwrap();
+pub fn retry_middleware(job: &mut Job, redis: RedisPool, next: NextFunc) -> MiddleWareResult {
+    use crate::job::BoolOrUSize::*;
+    let mut conn = redis.get().unwrap();
     let r = next(job, redis);
     match r {
         Err(e) => {
@@ -53,7 +54,7 @@ pub fn retry_middleware(job: &mut Job, redis: RedisPool, mut next: NextFunc) -> 
                                 s.split('\n').map(|s| s.to_string()).collect()
                             })
                             .unwrap_or(vec![]),
-                        failed_at: UTC::now(),
+                        failed_at: Utc::now(),
                         retried_at: None,
                     });
                     let _: () = conn.lpush(job.queue_name(), to_string(job).unwrap())?;
@@ -68,12 +69,12 @@ pub fn retry_middleware(job: &mut Job, redis: RedisPool, mut next: NextFunc) -> 
 
 pub fn time_elapse_middleware(job: &mut Job,
                               redis: RedisPool,
-                              mut next: NextFunc)
+                              next: NextFunc)
                               -> MiddleWareResult {
     let j = job.clone();
-    let now = UTC::now();
+    let now = Utc::now();
     let r = next(job, redis);
-    let that = UTC::now();
+    let that = Utc::now();
     info!("'{:?}' takes {}", j, that.signed_duration_since(now));
     r
 }

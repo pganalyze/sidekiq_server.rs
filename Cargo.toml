@@ -1,41 +1,32 @@
 [package]
-authors = ["Wu Young <doomsplayer@gmail.com>"]
 description = "Sidekiq compatible server in Rust"
-homepage = "https://github.com/doomsplayer/sidekiq-rs"
+homepage = "https://github.com/pganalyze/sidekiq_server.rs"
 license = "MIT"
-name = "sidekiq-rs"
-repository = "https://github.com/doomsplayer/sidekiq-rs"
+name = "sidekiq_server"
+repository = "https://github.com/pganalyze/sidekiq_server.rs"
 version = "0.7.1-pre"
+edition = "2021"
 readme = "README.md"
 keywords = ["sidekiq", "worker", "resque", "ruby"]
 
 [dependencies]
-chan = "0.1"
-chan-signal = "0.2"
-chrono = { version = "0.3", features = ["serde"] }
-env_logger = "0.4"
-error-chain = "0.10"
-libc = "0.2"
-log = "0.3"
-r2d2 = "0.7"
-r2d2_redis = "0.6"
-rand = "0.3"
-random_choice = "0.3"
-redis = "0.8"
-serde = "0.9"
-#serde_derive = "0.9"
-serde_json = "0.9"
-threadpool = "1.0.0"
-futures = "0.1"
-futures-cpupool = "0.1"
-hado = "0.1"
+crossbeam-channel = "0.5.4"
+signal-hook = "0.3.13"
+chrono = { version = "0.4.19", features = ["serde"] }
+env_logger = "0.9.0"
+error-chain = "0.12.4"
+libc = "0.2.125"
+log = "0.4.16"
+r2d2 = "0.8.9"
+rand = "0.8.5"
+redis = { version = "0.21.5", features = ["r2d2"] }
+serde = "1.0.136"
+serde_json = "1.0.79"
+threadpool = "1.8.1"
 
 [dev-dependencies]
-structopt = "0.0.3"
-structopt-derive = "0.0.3"
+structopt = "0.3.26"
+structopt-derive = "0.4.18"
 
 [features]
 default = []
-
-[lib]
-name = "sidekiq"
