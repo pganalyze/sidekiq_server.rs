@@ -9,7 +9,7 @@ use rand::{Rng, distributions};
 use threadpool::ThreadPool;
 
 use crossbeam_channel::{after, tick, Receiver, Sender};
-use signal_hook::consts as SysSignal;
+use signal_hook::consts::{SIGINT, SIGUSR1};
 use std::os::raw::c_int;
 
 use libc::getpid;
@@ -57,7 +57,7 @@ impl<'a> SidekiqServer<'a> {
     // Interfaces to be exposed
 
     pub fn new(redis: &str, concurrency: usize) -> Result<Self> {
-        let signal_chan = notify(&[SysSignal::SIGINT, SysSignal::SIGUSR1])?;
+        let signal_chan = signal_listen(&[SIGINT, SIGUSR1])?;
         let now = Utc::now();
         let pool = r2d2::Pool::builder()
             .max_size(concurrency as u32 + 3)
@@ -120,12 +120,12 @@ impl<'a> SidekiqServer<'a> {
             select! {
                 recv(signal) -> signal => {
                     match signal {
-                        Ok(signal @ SysSignal::SIGUSR1) => {
+                        Ok(signal @ SIGUSR1) => {
                             info!("{:?}: Terminating", signal);
                             self.terminate_gracefully(tox2, rsx2);
                             break;
                         }
-                        Ok(signal @ SysSignal::SIGINT) => {
+                        Ok(signal @ SIGINT) => {
                             info!("{:?}: Force terminating", signal);                            
                             self.terminate_forcely(tox2, rsx2);
                             break;
@@ -332,8 +332,8 @@ impl<'a> SidekiqServer<'a> {
     }
 }
 
-// A replacement for the chan-signal crate. Returns a Receiver that 
-fn notify(signals: &[c_int]) -> Result<crossbeam_channel::Receiver<c_int>> {
+// Listens for system signals, returning a Receiver that can be handled in a select! block.
+fn signal_listen(signals: &[c_int]) -> Result<crossbeam_channel::Receiver<c_int>> {
     let (s, r) = crossbeam_channel::bounded(100);
     let mut signals = signal_hook::iterator::Signals::new(signals)?;
     std::thread::spawn(move || {
