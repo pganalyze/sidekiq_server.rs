@@ -1,29 +1,29 @@
 use std::collections::BTreeMap;
+use std::iter;
 use std::time::Duration;
 
-use redis::{Pipeline, PipelineCommands};
-use r2d2::{Pool, Config};
-use r2d2_redis::RedisConnectionManager;
+use redis::Pipeline;
 
-use rand::Rng;
+use rand::{Rng, distributions};
 
 use threadpool::ThreadPool;
 
-use chan::{sync, after, tick, Receiver, Sender};
-use chan_signal::{Signal as SysSignal, notify};
+use crossbeam_channel::{after, tick, Receiver, Sender};
+use signal_hook::consts::{SIGINT, SIGUSR1};
+use std::os::raw::c_int;
 
 use libc::getpid;
 
-use chrono::UTC;
+use chrono::Utc;
 
 use serde_json::to_string;
 
-use worker::SidekiqWorker;
-use errors::*;
-use utils::rust_gethostname;
-use middleware::MiddleWare;
-use job_handler::JobHandler;
-use RedisPool;
+use crate::worker::SidekiqWorker;
+use crate::errors::*;
+use crate::utils::rust_gethostname;
+use crate::middleware::MiddleWare;
+use crate::job_handler::JobHandler;
+use crate::RedisPool;
 
 #[derive(Debug)]
 pub enum Signal {
@@ -41,14 +41,13 @@ pub struct SidekiqServer<'a> {
     redispool: RedisPool,
     threadpool: ThreadPool,
     pub namespace: String,
-    job_handlers: BTreeMap<String, Box<JobHandler + 'a>>,
-    middlewares: Vec<Box<MiddleWare + 'a>>,
+    job_handlers: BTreeMap<String, Box<dyn JobHandler + 'a>>,
+    middlewares: Vec<Box<dyn MiddleWare + 'a>>,
     queues: Vec<String>,
-    weights: Vec<f64>,
     started_at: f64,
     rs: String,
     pid: usize,
-    signal_chan: Receiver<SysSignal>,
+    signal_chan: Receiver<c_int>,
     worker_info: BTreeMap<String, bool>, // busy?
     concurrency: usize,
     pub force_quite_timeout: usize,
@@ -58,35 +57,36 @@ impl<'a> SidekiqServer<'a> {
     // Interfaces to be exposed
 
     pub fn new(redis: &str, concurrency: usize) -> Result<Self> {
-        let signal = notify(&[SysSignal::INT, SysSignal::USR1]); // should be here to set proper signal mask to all threads
-        let now = UTC::now();
-        let config = Config::builder()
-            .pool_size(concurrency as u32 + 3) // dunno why, it corrupt for unable to get connection sometimes with concurrency + 1
-            .build();
-        let manager = try!(RedisConnectionManager::new(redis));
-        let pool = try!(Pool::new(config, manager));
+        let signal_chan = signal_listen(&[SIGINT, SIGUSR1])?;
+        let now = Utc::now();
+        let pool = r2d2::Pool::builder()
+            .max_size(concurrency as u32 + 3)
+            .build(redis::Client::open(redis)?)?;
+
+        let mut rng = rand::thread_rng();
+        let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(12).collect();
+
         Ok(SidekiqServer {
             redispool: pool,
-            threadpool: ThreadPool::new_with_name("worker".into(), concurrency),
+            threadpool: ThreadPool::with_name("worker".into(), concurrency),
             namespace: String::new(),
             job_handlers: BTreeMap::new(),
             queues: vec![],
-            weights: vec![],
             started_at: now.timestamp() as f64 + now.timestamp_subsec_micros() as f64 / 1000000f64,
             pid: unsafe { getpid() } as usize,
             worker_info: BTreeMap::new(),
-            concurrency: concurrency,
-            signal_chan: signal,
+            concurrency,
+            signal_chan,
             force_quite_timeout: 10,
             middlewares: vec![],
-            // random itentity
-            rs: ::rand::thread_rng().gen_ascii_chars().take(12).collect(),
+            rs: String::from_utf8_lossy(&identity).to_string(),
         })
     }
 
     pub fn new_queue(&mut self, name: &str, weight: usize) {
-        self.queues.push(name.into());
-        self.weights.push(weight as f64);
+        for _ in 0..weight {
+            self.queues.push(name.into());
+        }
     }
 
     pub fn attach_handler<T: JobHandler + 'a>(&mut self, name: &str, handle: T) {
@@ -98,48 +98,48 @@ impl<'a> SidekiqServer<'a> {
     }
 
     pub fn start(&mut self) {
-        info!("sidekiq-rs is running...");
+        info!("sidekiq is running...");
         if self.queues.len() == 0 {
             error!("queue is empty, exiting");
             return;
         }
-        let (tsx, rsx) = sync(self.concurrency + 10);
-        let (tox, rox) = sync(self.concurrency + 10);
+        let (tsx, rsx) = crossbeam_channel::bounded(self.concurrency + 10);
+        let (tox, rox) = crossbeam_channel::bounded(self.concurrency + 10);
         let signal = self.signal_chan.clone();
 
         // start worker threads
         self.launch_workers(tsx.clone(), rox.clone());
 
         // controller loop
-        let (tox2, rsx2) = (tox.clone(), rsx.clone()); // rename channels cuz `chan_select!` will rename'em below
+        let (tox2, rsx2) = (tox.clone(), rsx.clone()); // rename channels b/c `select!` will rename them below
         let clock = tick(Duration::from_secs(2)); // report to sidekiq every 5 secs
         loop {
             if let Err(e) = self.report_alive() {
                 error!("report alive failed: '{}'", e);
             }
-            chan_select! {
-                signal.recv() -> signal => {
+            select! {
+                recv(signal) -> signal => {
                     match signal {
-                        Some(signal @ SysSignal::USR1) => {
+                        Ok(signal @ SIGUSR1) => {
                             info!("{:?}: Terminating", signal);
                             self.terminate_gracefully(tox2, rsx2);
                             break;
                         }
-                        Some(signal @ SysSignal::INT) => {
+                        Ok(signal @ SIGINT) => {
                             info!("{:?}: Force terminating", signal);                            
                             self.terminate_forcely(tox2, rsx2);
                             break;
                         }
-                        Some(_) => { unimplemented!() }
-                        None => { unimplemented!() }
+                        Ok(_) => { unimplemented!() }
+                        Err(_) => { unimplemented!() }
                     }
                 },
-                clock.recv() => {
+                recv(clock) -> _ => {
                     debug!("server clock triggered");
                 },
-                rsx.recv() -> sig => {
+                recv(rsx) -> sig => {
                     debug!("received signal {:?}", sig);
-                    if let Some(Err(e)) = sig.map(|s| self.deal_signal(s)) {
+                    if let Ok(Err(e)) = sig.map(|s| self.deal_signal(s)) {
                         error!("error when dealing signal: '{}'", e);
                     }
                     let worker_count = self.threadpool.active_count();
@@ -174,7 +174,6 @@ impl<'a> SidekiqServer<'a> {
                                         tsx,
                                         rox,
                                         self.queues.clone(),
-                                        self.weights.clone(),
                                         self.job_handlers
                                             .iter_mut()
                                             .map(|(k, v)| (k.clone(), v.cloned()))
@@ -187,7 +186,7 @@ impl<'a> SidekiqServer<'a> {
 
     fn inform_termination(&self, tox: Sender<Operation>) {
         for _ in 0..self.concurrency {
-            tox.send(Operation::Terminate);
+            tox.send(Operation::Terminate).ok();
         }
     }
 
@@ -197,14 +196,14 @@ impl<'a> SidekiqServer<'a> {
         let timer = after(Duration::from_secs(self.force_quite_timeout as u64));
         // deplete the signal channel
         loop {
-            chan_select! {
-                timer.recv() => {
+            select! {
+                recv(timer) -> _ => {
                     info!("force quitting");
                     break
                 },
-                rsx.recv() -> sig => {
+                recv(rsx) -> sig => {
                     debug!("received signal {:?}", sig);
-                    if let Some(Err(e)) = sig.map(|s| self.deal_signal(s)) {
+                    if let Ok(Err(e)) = sig.map(|s| self.deal_signal(s)) {
                         error!("error when dealing signal: '{}'", e);
                     }
                     if self.worker_info.len() == 0 {
@@ -222,10 +221,10 @@ impl<'a> SidekiqServer<'a> {
         info!("waiting for other workers exit");
         // deplete the signal channel
         loop {
-            chan_select! {
-                rsx.recv() -> sig => {
+            select! {
+                recv(rsx) -> sig => {
                     debug!("received signal {:?}", sig);
-                    if let Some(Err(e)) = sig.map(|s| self.deal_signal(s)) {
+                    if let Ok(Err(e)) = sig.map(|s| self.deal_signal(s)) {
                         error!("error when dealing signal: '{}'", e);
                     }
                     if self.worker_info.len()== 0 {
@@ -241,11 +240,11 @@ impl<'a> SidekiqServer<'a> {
         debug!("dealing signal {:?}", sig);
         match sig {
             Signal::Complete(id, n) => {
-                let _ = try!(self.report_processed(n));
+                let _ = self.report_processed(n)?;
                 *self.worker_info.get_mut(&id).unwrap() = false;
             }
             Signal::Fail(id, n) => {
-                let _ = try!(self.report_failed(n));
+                let _ = self.report_failed(n)?;
                 *self.worker_info.get_mut(&id).unwrap() = false;
             }
             Signal::Acquire(id) => {
@@ -263,7 +262,7 @@ impl<'a> SidekiqServer<'a> {
 
 
     fn report_alive(&mut self) -> Result<()> {
-        let now = UTC::now();
+        let now = Utc::now();
 
         let content = vec![("info",
                             to_string(&json!({
@@ -281,12 +280,12 @@ impl<'a> SidekiqServer<'a> {
                             (now.timestamp() as f64 +
                              now.timestamp_subsec_micros() as f64 / 1000000f64)
                                 .to_string())];
-        let conn = try!(self.redispool.get());
-        try!(Pipeline::new()
+        let mut conn = self.redispool.get()?;
+        Pipeline::new()
             .hset_multiple(self.with_namespace(&self.identity()), &content)
             .expire(self.with_namespace(&self.identity()), 5)
             .sadd(self.with_namespace(&"processes"), self.identity())
-            .query::<()>(&*conn));
+            .query(&mut *conn)?;
 
         Ok(())
 
@@ -294,24 +293,24 @@ impl<'a> SidekiqServer<'a> {
 
 
     fn report_processed(&mut self, n: usize) -> Result<()> {
-        let connection = try!(self.redispool.get());
+        let mut connection = self.redispool.get()?;
         let _: () = Pipeline::new().incr(self.with_namespace(&format!("stat:processed:{}",
-                                               UTC::now().format("%Y-%m-%d"))),
+                                               Utc::now().format("%Y-%m-%d"))),
                   n)
             .incr(self.with_namespace(&format!("stat:processed")), n)
-            .query(&*connection)?;
+            .query(&mut *connection)?;
 
         Ok(())
     }
 
 
     fn report_failed(&mut self, n: usize) -> Result<()> {
-        let connection = try!(self.redispool.get());
+        let mut connection = self.redispool.get()?;
         let _: () = Pipeline::new()
-            .incr(self.with_namespace(&format!("stat:failed:{}", UTC::now().format("%Y-%m-%d"))),
+            .incr(self.with_namespace(&format!("stat:failed:{}", Utc::now().format("%Y-%m-%d"))),
                   n)
             .incr(self.with_namespace(&format!("stat:failed")), n)
-            .query(&*connection)?;
+            .query(&mut *connection)?;
         Ok(())
     }
 
@@ -331,4 +330,16 @@ impl<'a> SidekiqServer<'a> {
             self.namespace.clone() + ":" + snippet
         }
     }
+}
+
+// Listens for system signals, returning a Receiver that can be handled in a select! block.
+fn signal_listen(signals: &[c_int]) -> Result<crossbeam_channel::Receiver<c_int>> {
+    let (s, r) = crossbeam_channel::bounded(100);
+    let mut signals = signal_hook::iterator::Signals::new(signals)?;
+    std::thread::spawn(move || {
+        for signal in signals.forever() {
+            s.send(signal).ok();
+        }
+    });
+    Ok(r)
 }

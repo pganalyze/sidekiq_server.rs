@@ -1,10 +1,4 @@
-extern crate structopt;
-#[macro_use]
-extern crate structopt_derive;
-extern crate sidekiq;
-extern crate env_logger;
-
-use sidekiq::{error_handler, panic_handler, printer_handler, retry_middleware, SidekiqServer};
+use sidekiq_server::{error_handler, panic_handler, printer_handler, retry_middleware, SidekiqServer};
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug, Clone)]
@@ -22,8 +16,14 @@ struct Params {
     timeout: usize,
 }
 
+//
+// Command to see a worker randomly check queues based on their weight:
+//
+// RUST_LOG=debug cargo run --example main -- -q a:1 -q b:2 -q c:3 -c 1   
+//
+
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init();
     let params = Params::from_args();
 
     let queues: Vec<_> = params.queues
@@ -35,7 +35,6 @@ fn main() {
             (name.to_string(), weight)
         })
         .collect();
-
 
     let mut server = SidekiqServer::new(&params.redis, params.concurrency).unwrap();
 

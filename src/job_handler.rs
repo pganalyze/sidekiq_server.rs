@@ -1,13 +1,13 @@
-use job::Job;
-use JobSuccessType;
-use ::JobSuccessType::*;
-use errors::{ErrorKind, Result};
+use crate::job::Job;
+use crate::JobSuccessType;
+use crate::JobSuccessType::*;
+use crate::errors::{ErrorKind, Result};
 
 pub type JobHandlerResult = Result<JobSuccessType>;
 
 pub trait JobHandler: Send {
     fn handle(&mut self, job: &Job) -> JobHandlerResult;
-    fn cloned(&mut self) -> Box<JobHandler>;
+    fn cloned(&mut self) -> Box<dyn JobHandler>;
 }
 
 impl<F> JobHandler for F
@@ -16,7 +16,7 @@ impl<F> JobHandler for F
     fn handle(&mut self, job: &Job) -> JobHandlerResult {
         self(job)
     }
-    fn cloned(&mut self) -> Box<JobHandler> {
+    fn cloned(&mut self) -> Box<dyn JobHandler> {
         Box::new(*self)
     }
 }
