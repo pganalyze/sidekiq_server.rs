@@ -15,7 +15,6 @@ signal-hook = "0.3.14"
 chrono = { version = "0.4.19", features = ["serde"] }
 env_logger = "0.9.0"
 error-chain = "0.12.4" # 2 years since last release. consider replacing with a different crate
-libc = "0.2.126"
 log = "0.4.17"
 r2d2 = "0.8.10"
 rand = "0.8.5"
@@ -23,6 +22,7 @@ redis = { version = "0.21.5", features = ["r2d2"] }
 serde = "1.0.137"
 serde_json = "1.0.81"
 threadpool = "1.8.1" # 2 years since last release. there is a 2.0 branch currently in development
+gethostname = "0.2.3"
 
 [dev-dependencies]
 structopt = "0.3.26"

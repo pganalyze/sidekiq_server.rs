@@ -12,15 +12,13 @@ use crossbeam_channel::{after, tick, Receiver, Sender};
 use signal_hook::consts::{SIGINT, SIGUSR1};
 use std::os::raw::c_int;
 
-use libc::getpid;
-
 use chrono::Utc;
 
 use serde_json::to_string;
 
 use crate::worker::SidekiqWorker;
 use crate::errors::*;
-use crate::utils::rust_gethostname;
+use gethostname::gethostname;
 use crate::middleware::MiddleWare;
 use crate::job_handler::JobHandler;
 use crate::RedisPool;
@@ -46,7 +44,7 @@ pub struct SidekiqServer<'a> {
     queues: Vec<String>,
     started_at: f64,
     rs: String,
-    pid: usize,
+    pid: u32,
     signal_chan: Receiver<c_int>,
     worker_info: BTreeMap<String, bool>, // busy?
     concurrency: usize,
@@ -73,7 +71,7 @@ impl<'a> SidekiqServer<'a> {
             job_handlers: BTreeMap::new(),
             queues: vec![],
             started_at: now.timestamp() as f64 + now.timestamp_subsec_micros() as f64 / 1000000f64,
-            pid: unsafe { getpid() } as usize,
+            pid: std::process::id(),
             worker_info: BTreeMap::new(),
             concurrency,
             signal_chan,
@@ -266,7 +264,7 @@ impl<'a> SidekiqServer<'a> {
 
         let content = vec![("info",
                             to_string(&json!({
-                                "hostname": rust_gethostname().unwrap_or("unknown".into()),
+                                "hostname": self.hostname(),
                                 "started_at": self.started_at,
                                 "pid": self.pid,
                                 "concurrency": self.concurrency,
@@ -315,11 +313,15 @@ impl<'a> SidekiqServer<'a> {
     }
 
 
+    // OsStr -> Lossy UTF-8 | No errors
+    fn hostname(&self) -> String {
+        gethostname().to_string_lossy().into_owned()
+    }
+    
     fn identity(&self) -> String {
-        let host = rust_gethostname().unwrap_or("unknown".into());
         let pid = self.pid;
 
-        host + ":" + &pid.to_string() + ":" + &self.rs
+        self.hostname() + ":" + &pid.to_string() + ":" + &self.rs
     }
 
 
