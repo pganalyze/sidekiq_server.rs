@@ -19,7 +19,7 @@ struct Params {
 //
 // Command to see a worker randomly check queues based on their weight:
 //
-// RUST_LOG=debug cargo run --example main -- -q a:1 -q b:2 -q c:3 -c 1   
+// RUST_LOG=debug cargo run --example main -- -q a:1 -q b:2 -q c:3 -c 1
 //
 
 fn main() {
