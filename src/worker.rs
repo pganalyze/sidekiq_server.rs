@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::iter;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
@@ -51,19 +51,22 @@ impl<'a> SidekiqWorker<'a> {
         let mut rng = rand::thread_rng();
         let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(9).collect();
 
+        // 1. randomize the queue list (which is filled with duplicates based on priority)
         let mut queues = queues.clone();
-        queues.shuffle(&mut rand::thread_rng());
+        queues.shuffle(&mut rng);
+        // 2. remove duplicates. this ensures that some workers will prefer low-priority queues
+        let queues = queues.into_iter().collect::<HashSet<String>>().into_iter().collect();
 
         SidekiqWorker {
             id: String::from_utf8_lossy(&identity).to_string(),
             server_id: server_id.into(),
-            pool: pool,
-            namespace: namespace,
-            queues: queues,
-            handlers: handlers,
-            middlewares: middlewares,
-            tx: tx,
-            rx: rx,
+            pool,
+            namespace,
+            queues,
+            handlers,
+            middlewares,
+            tx,
+            rx,
             processed: 0,
             failed: 0,
         }
@@ -72,15 +75,13 @@ impl<'a> SidekiqWorker<'a> {
     pub fn work(mut self) {
         info!("worker '{}' start working", self.with_server_id(&self.id));
         // main loop is here
-        let mut iter = self.queues.clone().into_iter().cycle(); // loops over the queue forever
         let rx = self.rx.clone();
         let clock = tick(Duration::from_secs(1));
         loop {
             select! {
                 default => {
-                    let queue_name = iter.next().unwrap();
                     debug!("{} run queue once", self.id);
-                    match self.run_queue_once(&queue_name) {
+                    match self.run_queue_once() {
                         Ok(true) => self.processed += 1,
                         Ok(false) => {}
                         Err(e) => {
@@ -97,9 +98,9 @@ impl<'a> SidekiqWorker<'a> {
                 },
                 recv(rx) -> op => {
                     if let Ok(Operation::Terminate) = op {
-                        info!("{}: Terminate signal received, exiting...", self.id);
+                        info!("{} Terminate signal received, exiting...", self.id);
                         self.tx.send(Signal::Terminated(self.id.clone())).ok();
-                        debug!("{}: Terminate signal sent", self.id);
+                        debug!("{} Terminate signal sent", self.id);
                         return;
                     } else {
                         unimplemented!()
@@ -110,14 +111,14 @@ impl<'a> SidekiqWorker<'a> {
     }
 
 
-    fn run_queue_once(&mut self, name: &str) -> Result<bool> {
-        let queue_name = self.queue_name(name);
-        debug!("{}: queue name '{}'", self.id, queue_name);
+    fn run_queue_once(&mut self) -> Result<bool> {
+        let queues: Vec<String> = self.queues.iter().map(|q| self.queue_name(q)).collect();
 
-        let result: Option<Vec<String>> = self.pool.get()?.brpop(&queue_name, 2)?;
+        let result: Option<(String, String)> = self.pool.get()?.brpop(queues, 10)?;
 
-        if let Some(result) = result {
-            let mut job: Job = from_str(&result[1])?;
+        if let Some((queue, job)) = result {
+            debug!("{} job received for queue {}", self.id, queue);
+            let mut job: Job = from_str(&job)?;
             self.tx.send(Signal::Acquire(self.id.clone())).ok();
             if let Some(ref mut retry_info) = job.retry_info {
                 retry_info.retried_at = Some(Utc::now());
@@ -138,7 +139,7 @@ impl<'a> SidekiqWorker<'a> {
 
 
     fn perform(&mut self, job: Job) -> Result<JobSuccessType> {
-        debug!("{}: job is {:?}", self.id, job);
+        debug!("{} {:?}", self.id, job);
 
         let mut handler = if let Some(handler) = self.handlers.get_mut(&job.class) {
             handler.cloned()
