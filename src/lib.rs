@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 extern crate serde;
 #[macro_use]
 extern crate serde_json;
@@ -9,7 +11,6 @@ extern crate error_chain;
 extern crate threadpool;
 extern crate redis;
 extern crate rand;
-extern crate libc;
 extern crate chrono;
 #[macro_use]
 extern crate crossbeam_channel;
@@ -18,7 +19,6 @@ mod server;
 mod job_handler;
 pub mod errors;
 mod job;
-mod utils;
 mod worker;
 mod middleware;
 
