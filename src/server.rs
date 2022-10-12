@@ -1,14 +1,21 @@
 use std::collections::BTreeMap;
-use std::iter;
+use std::future::Future;
+use std::{iter, sync::Arc};
 
 use anyhow::Result;
+use dashmap::DashMap;
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use redis::{aio::ConnectionManager, Pipeline};
 
-use rand::{Rng, distributions};
+use rand::{distributions, Rng};
 
 use async_channel::{bounded, Receiver, Sender};
 
-use tokio::{select, time::{self, sleep, Duration}};
+use tokio::{
+    select,
+    time::{self, sleep, Duration},
+};
 
 use signal_hook::consts::{SIGINT, SIGUSR1};
 use std::os::raw::c_int;
@@ -17,9 +24,8 @@ use chrono::Utc;
 
 use serde_json::to_string;
 
-use crate::worker::SidekiqWorker;
+use crate::{worker::SidekiqWorker, Job, JobSuccessType};
 use gethostname::gethostname;
-use crate::job_handler::JobHandler;
 
 #[derive(Debug)]
 pub enum Signal {
@@ -29,6 +35,8 @@ pub enum Signal {
     Terminated(String),
 }
 
+pub type JobHandlerDyn = Box<dyn Send + Sync + FnMut(Job) -> BoxFuture<'static, Result<JobSuccessType>>>;
+
 pub enum Operation {
     Terminate,
 }
@@ -37,7 +45,7 @@ pub struct SidekiqServer {
     redis_url: String,
     redis: ConnectionManager,
     pub namespace: String,
-    job_handlers: BTreeMap<String, Box<dyn JobHandler>>,
+    job_handlers: Arc<DashMap<String, JobHandlerDyn>>,
     queues: Vec<String>,
     started_at: f64,
     rs: String,
@@ -52,19 +60,24 @@ impl SidekiqServer {
     // Interfaces to be exposed
 
     pub async fn new(redis_url: &str, concurrency: usize) -> Result<SidekiqServer> {
-        let redis = ConnectionManager::new(redis::Client::open(redis_url.clone()).unwrap()).await.unwrap();
+        let redis = ConnectionManager::new(redis::Client::open(redis_url.clone()).unwrap())
+            .await
+            .unwrap();
 
         let signal_chan = signal_listen(&[SIGINT, SIGUSR1])?;
         let now = Utc::now();
 
         let mut rng = rand::thread_rng();
-        let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(12).collect();
+        let identity: Vec<u8> = iter::repeat(())
+            .map(|()| rng.sample(distributions::Alphanumeric))
+            .take(12)
+            .collect();
 
         Ok(SidekiqServer {
             redis_url: redis_url.into(),
             redis,
             namespace: String::new(),
-            job_handlers: BTreeMap::new(),
+            job_handlers: Arc::new(DashMap::new()),
             queues: vec![],
             started_at: now.timestamp() as f64 + now.timestamp_subsec_micros() as f64 / 1000000f64,
             pid: std::process::id(),
@@ -82,8 +95,12 @@ impl SidekiqServer {
         }
     }
 
-    pub fn attach_handler<T: JobHandler + 'static>(&mut self, name: &str, handle: T) {
-        self.job_handlers.insert(name.into(), Box::new(handle));
+    pub fn attach_handler<F, Fut>(&mut self, name: &str, mut handler: F)
+    where
+        F: Send + Sync + 'static + FnMut(Job) -> Fut,
+        Fut: Send + Sync + 'static + Future<Output = Result<JobSuccessType>>,
+    {
+        self.job_handlers.insert(name.into(), Box::new(move |job| handler(job).boxed()));
     }
 
     pub async fn start(&mut self) {
@@ -118,7 +135,7 @@ impl SidekiqServer {
                             break;
                         }
                         Ok(signal @ SIGINT) => {
-                            info!("{:?}: Force terminating", signal);                            
+                            info!("{:?}: Force terminating", signal);
                             self.terminate_forcely(tox2, rsx2).await;
                             break;
                         }
@@ -151,25 +168,23 @@ impl SidekiqServer {
 
     // Worker start/terminate functions
 
-
     async fn launch_workers(&mut self, tsx: Sender<Signal>, rox: Receiver<Operation>) {
         while self.worker_info.len() < self.concurrency {
             self.launch_worker(tsx.clone(), rox.clone()).await;
         }
     }
 
-
     async fn launch_worker(&mut self, tsx: Sender<Signal>, rox: Receiver<Operation>) {
-        let worker = SidekiqWorker::new(&self.identity(),
-                                        &self.redis_url,
-                                        tsx,
-                                        rox,
-                                        self.queues.clone(),
-                                        self.job_handlers
-                                            .iter_mut()
-                                            .map(|(k, v)| (k.clone(), v.cloned()))
-                                            .collect(),
-                                        self.namespace.clone()).await;
+        let worker = SidekiqWorker::new(
+            &self.identity(),
+            &self.redis_url,
+            tsx,
+            rox,
+            self.queues.clone(),
+            Arc::clone(&self.job_handlers),
+            self.namespace.clone(),
+        )
+        .await;
         self.worker_info.insert(worker.id.clone(), false);
         tokio::spawn(async move { worker.work().await });
     }
@@ -203,7 +218,6 @@ impl SidekiqServer {
         }
     }
 
-
     async fn terminate_gracefully(&mut self, tox: Sender<Operation>, rsx: Receiver<Signal>) {
         self.inform_termination(tox).await;
 
@@ -222,7 +236,6 @@ impl SidekiqServer {
             }
         }
     }
-
 
     async fn deal_signal(&mut self, sig: Signal) -> Result<()> {
         debug!("dealing signal {:?}", sig);
@@ -248,69 +261,83 @@ impl SidekiqServer {
 
     // Sidekiq dashboard reporting functions
 
-
     async fn report_alive(&mut self) -> Result<()> {
         let now = Utc::now();
 
-        let content = vec![("info",
-                            to_string(&json!({
-                                "hostname": self.hostname(),
-                                "started_at": self.started_at,
-                                "pid": self.pid,
-                                "concurrency": self.concurrency,
-                                "queues": self.queues.clone(),
-                                "labels": [],
-                                "identity": self.identity()
-                            }))
-                                .unwrap()),
-                           ("busy", self.worker_info.values().filter(|v| **v).count().to_string()),
-                           ("beat",
-                            (now.timestamp() as f64 +
-                             now.timestamp_subsec_micros() as f64 / 1000000f64)
-                                .to_string())];
+        let content = vec![
+            (
+                "info",
+                to_string(&json!({
+                    "hostname": self.hostname(),
+                    "started_at": self.started_at,
+                    "pid": self.pid,
+                    "concurrency": self.concurrency,
+                    "queues": self.queues.clone(),
+                    "labels": [],
+                    "identity": self.identity()
+                }))
+                .unwrap(),
+            ),
+            (
+                "busy",
+                self.worker_info
+                    .values()
+                    .filter(|v| **v)
+                    .count()
+                    .to_string(),
+            ),
+            (
+                "beat",
+                (now.timestamp() as f64 + now.timestamp_subsec_micros() as f64 / 1000000f64)
+                    .to_string(),
+            ),
+        ];
 
         Pipeline::new()
             .hset_multiple(self.with_namespace(&self.identity()), &content)
             .expire(self.with_namespace(&self.identity()), 5)
             .sadd(self.with_namespace(&"processes"), self.identity())
-            .query_async(&mut self.redis).await?;
+            .query_async(&mut self.redis)
+            .await?;
 
         Ok(())
-
     }
-
-
 
     async fn report_processed(&mut self, n: usize) -> Result<()> {
         Pipeline::new()
-            .incr(self.with_namespace(&format!("stat:processed:{}", Utc::now().format("%Y-%m-%d"))), n)
+            .incr(
+                self.with_namespace(&format!("stat:processed:{}", Utc::now().format("%Y-%m-%d"))),
+                n,
+            )
             .incr(self.with_namespace(&format!("stat:processed")), n)
-            .query_async(&mut self.redis).await?;
+            .query_async(&mut self.redis)
+            .await?;
 
         Ok(())
     }
-
 
     async fn report_failed(&mut self, n: usize) -> Result<()> {
         Pipeline::new()
-            .incr(self.with_namespace(&format!("stat:failed:{}", Utc::now().format("%Y-%m-%d"))), n)
+            .incr(
+                self.with_namespace(&format!("stat:failed:{}", Utc::now().format("%Y-%m-%d"))),
+                n,
+            )
             .incr(self.with_namespace(&format!("stat:failed")), n)
-            .query_async(&mut self.redis).await?;
+            .query_async(&mut self.redis)
+            .await?;
         Ok(())
     }
-
 
     // OsStr -> Lossy UTF-8 | No errors
     fn hostname(&self) -> String {
         gethostname().to_string_lossy().into_owned()
     }
-    
+
     fn identity(&self) -> String {
         let pid = self.pid;
 
         self.hostname() + ":" + &pid.to_string() + ":" + &self.rs
     }
-
 
     fn with_namespace(&self, snippet: &str) -> String {
         if self.namespace == "" {

@@ -7,6 +7,9 @@ use serde::de::Error;
 use serde::ser::SerializeMap;
 
 use chrono::{DateTime, Utc, NaiveDateTime};
+use anyhow::Result;
+
+use crate::JobSuccessType;
 
 #[derive(Debug, Clone)]
 pub enum BoolOrUSize {
@@ -165,6 +168,8 @@ impl Serialize for Job {
 
     }
 }
+
+pub type JobHandlerResult = Result<JobSuccessType>;
 
 #[derive(Clone, Debug)]
 pub struct RetryInfo {

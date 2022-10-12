@@ -11,8 +11,7 @@ mod job;
 mod worker;
 
 pub use server::SidekiqServer;
-pub use job_handler::JobHandlerResult;
-pub use job::{Job, RetryInfo};
+pub use job::{Job, JobHandlerResult, RetryInfo};
 
 #[derive(Debug, Clone)]
 pub enum JobSuccessType {

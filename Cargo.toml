@@ -24,6 +24,7 @@ redis = { version = "0.21.5", features = ["connection-manager", "tokio-comp"] }
 serde = "1.0.137"
 serde_json = "1.0.81"
 tokio = { version = "1.21.1", features = ["full"] }
+dashmap = "5.4.0"
 
 [dev-dependencies]
 structopt = "0.3.26"

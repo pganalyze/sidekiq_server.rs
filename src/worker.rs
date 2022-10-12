@@ -1,60 +1,75 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::iter;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use futures::future::FutureExt;
-use rand::{Rng, distributions, seq::SliceRandom};
+use dashmap::DashMap;
+use rand::{distributions, seq::SliceRandom, Rng};
 
 use async_channel::{Receiver, Sender};
 
-use tokio::{runtime::Handle, select, task, time::{self, Duration}};
+use tokio::{
+    runtime::Handle,
+    select, task,
+    time::{self, Duration},
+};
 
-use serde_json::from_str;
 use redis::{aio::ConnectionManager, AsyncCommands, Pipeline};
+use serde_json::from_str;
 
-use serde_json::{to_string, Value as JValue};
 use chrono::Utc;
+use serde_json::{to_string, Value as JValue};
 
-use crate::server::{Signal, Operation};
 use crate::job::Job;
-use crate::job_handler::JobHandler;
+use crate::server::{Operation, Signal, JobHandlerDyn};
 use crate::JobSuccessType;
 
-
-pub struct SidekiqWorker<'a> {
+pub struct SidekiqWorker {
     pub id: String,
     server_id: String,
     redis: ConnectionManager,
     namespace: String,
     queues: Vec<String>,
-    handlers: BTreeMap<String, Box<dyn JobHandler + 'a>>,
+    handlers: Arc<DashMap<String, JobHandlerDyn>>,
     tx: Sender<Signal>,
     rx: Option<Receiver<Operation>>,
     processed: usize,
     failed: usize,
 }
 
-impl<'a> SidekiqWorker<'a> {
-    pub async fn new(server_id: &str,
-               redis_url: &str,
-               tx: Sender<Signal>,
-               rx: Receiver<Operation>,
-               queues: Vec<String>,
-               handlers: BTreeMap<String, Box<dyn JobHandler>>,
-               namespace: String)
-               -> SidekiqWorker<'a> {
-
-        let redis = ConnectionManager::new(redis::Client::open(redis_url.clone()).unwrap()).await.unwrap();
+impl SidekiqWorker {
+    pub async fn new(
+        server_id: &str,
+        redis_url: &str,
+        tx: Sender<Signal>,
+        rx: Receiver<Operation>,
+        queues: Vec<String>,
+        handlers: Arc<DashMap<
+            String,
+            JobHandlerDyn,
+        >>,
+        namespace: String,
+    ) -> Self {
+        let redis = ConnectionManager::new(redis::Client::open(redis_url.clone()).unwrap())
+            .await
+            .unwrap();
 
         let mut rng = rand::thread_rng();
-        let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(9).collect();
+        let identity: Vec<u8> = iter::repeat(())
+            .map(|()| rng.sample(distributions::Alphanumeric))
+            .take(9)
+            .collect();
 
         // 1. randomize the queue list (which is filled with duplicates based on priority)
         let mut queues = queues.clone();
         queues.shuffle(&mut rng);
         // 2. remove duplicates. this ensures that some workers will prefer low-priority queues
-        let queues = queues.into_iter().collect::<HashSet<String>>().into_iter().collect();
+        let queues = queues
+            .into_iter()
+            .collect::<HashSet<String>>()
+            .into_iter()
+            .collect();
 
         SidekiqWorker {
             id: String::from_utf8_lossy(&identity).to_string(),
@@ -138,42 +153,46 @@ impl<'a> SidekiqWorker<'a> {
         }
     }
 
-
     async fn perform(&mut self, job: Job) -> Result<JobSuccessType> {
         debug!("{} {:?}", self.id, job);
 
         let mut handler = if let Some(handler) = self.handlers.get_mut(&job.class) {
-            handler.cloned()
+            handler
         } else {
             warn!("unknown job class '{}'", job.class);
             return Err(anyhow!("unknown job class"));
         };
 
-        let future = handler.handle(&job);
-        match AssertUnwindSafe(future).catch_unwind().await {
+        let future = Box::pin(handler(job));
+        match AssertUnwindSafe(future).await {
             Err(_) => {
                 error!("Worker '{}' panicked, recovering", self.id);
                 Err(anyhow!("Worker crashed"))
             }
-            Ok(r) => r,
+            Ok(r) => Ok(r),
         }
     }
 
     async fn sync_state(&mut self) {
         if self.processed != 0 {
             debug!("{} sending complete signal", self.id);
-            self.tx.send(Signal::Complete(self.id.clone(), self.processed)).await.ok();
+            self.tx
+                .send(Signal::Complete(self.id.clone(), self.processed))
+                .await
+                .ok();
             self.processed = 0;
         }
         if self.failed != 0 {
             debug!("{} sending fail signal", self.id);
-            self.tx.send(Signal::Fail(self.id.clone(), self.failed)).await.ok();
+            self.tx
+                .send(Signal::Fail(self.id.clone(), self.failed))
+                .await
+                .ok();
             self.failed = 0;
         }
     }
 
     // Sidekiq dashboard reporting functions
-
 
     async fn report_working(&mut self, job: &Job) -> Result<()> {
         let worker_key = self.with_namespace(&self.with_server_id("workers"));
@@ -182,20 +201,20 @@ impl<'a> SidekiqWorker<'a> {
             "payload": job,
             "run_at": Utc::now().timestamp()
         });
-        Pipeline::new().hset(&worker_key, &self.id, to_string(&payload).unwrap())
+        Pipeline::new()
+            .hset(&worker_key, &self.id, to_string(&payload).unwrap())
             .expire(&worker_key, 5)
-            .query_async(&mut self.redis).await?;
+            .query_async(&mut self.redis)
+            .await?;
 
         Ok(())
     }
-
 
     async fn report_done(&mut self) -> Result<()> {
         let worker_key = self.with_namespace(&self.with_server_id("workers"));
         self.redis.hdel(&worker_key, &self.id).await?;
         Ok(())
     }
-
 
     fn with_namespace(&self, snippet: &str) -> String {
         if self.namespace == "" {
@@ -205,11 +224,9 @@ impl<'a> SidekiqWorker<'a> {
         }
     }
 
-
     fn with_server_id(&self, snippet: &str) -> String {
         self.server_id.clone() + ":" + snippet
     }
-
 
     fn queue_name(&self, name: &str) -> String {
         self.with_namespace(&("queue:".to_string() + name))
