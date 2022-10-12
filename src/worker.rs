@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
+use futures::FutureExt;
 use rand::{distributions, seq::SliceRandom, Rng};
 
 use async_channel::{Receiver, Sender};
@@ -164,12 +165,12 @@ impl SidekiqWorker {
         };
 
         let future = Box::pin(handler(job));
-        match AssertUnwindSafe(future).await {
+        match AssertUnwindSafe(future).catch_unwind().await {
             Err(_) => {
                 error!("Worker '{}' panicked, recovering", self.id);
                 Err(anyhow!("Worker crashed"))
             }
-            Ok(r) => Ok(r),
+            Ok(r) => r,
         }
     }
 
