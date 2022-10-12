@@ -62,15 +62,15 @@ fn main() {
     });
 }
 
-async fn default_job(job: &Job) -> JobHandlerResult {
+async fn default_job(job: Job) -> JobHandlerResult {
     info!("handling {:?}", job);
     Ok(Success)
 }
 
-async fn failing_job(_job: &Job) -> JobHandlerResult {
+async fn failing_job(_job: Job) -> JobHandlerResult {
     Err(anyhow!("oh no"))
 }
 
-async fn panicking_job(_job: &Job) -> JobHandlerResult {
+async fn panicking_job(_job: Job) -> JobHandlerResult {
     panic!("oh no")
 }
