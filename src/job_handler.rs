@@ -1,35 +1,28 @@
+use std::future::Future;
+
+use anyhow::Result;
+use async_trait::async_trait;
+
 use crate::job::Job;
 use crate::JobSuccessType;
-use crate::JobSuccessType::*;
-use crate::errors::{ErrorKind, Result};
 
 pub type JobHandlerResult = Result<JobSuccessType>;
 
+#[async_trait]
 pub trait JobHandler: Send {
-    fn handle(&mut self, job: &Job) -> JobHandlerResult;
+    async fn handle(&mut self, job: &Job) -> JobHandlerResult;
     fn cloned(&mut self) -> Box<dyn JobHandler>;
 }
 
-impl<F> JobHandler for F
-    where F: FnMut(&Job) -> JobHandlerResult + Copy + Send + 'static
+#[async_trait]
+impl<F, Fut> JobHandler for F
+    where F: Fn(&Job) -> Fut + Copy + Send + Sync + 'static,
+        Fut: Future<Output = JobHandlerResult> + Send
 {
-    fn handle(&mut self, job: &Job) -> JobHandlerResult {
-        self(job)
+    async fn handle(&mut self, job: &Job) -> JobHandlerResult {
+        self(job).await
     }
     fn cloned(&mut self) -> Box<dyn JobHandler> {
         Box::new(*self)
     }
-}
-
-pub fn printer_handler(job: &Job) -> JobHandlerResult {
-    info!("handling {:?}", job);
-    Ok(Success)
-}
-
-pub fn error_handler(_: &Job) -> JobHandlerResult {
-    Err(ErrorKind::JobHandlerError(Box::new("a".parse::<i8>().unwrap_err())).into())
-}
-
-pub fn panic_handler(_: &Job) -> JobHandlerResult {
-    panic!("yeah, I do it deliberately")
 }

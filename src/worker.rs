@@ -1,52 +1,51 @@
 use std::collections::{BTreeMap, HashSet};
 use std::iter;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::time::Duration;
+use std::panic::AssertUnwindSafe;
 
+use anyhow::{anyhow, Result};
+use futures::future::FutureExt;
 use rand::{Rng, distributions, seq::SliceRandom};
 
-use crossbeam_channel::{Sender, Receiver, tick};
+use async_channel::{Receiver, Sender};
+
+use tokio::{runtime::Handle, select, task, time::{self, Duration}};
 
 use serde_json::from_str;
-use redis::{Pipeline};
-use redis::Commands;
+use redis::{aio::ConnectionManager, AsyncCommands, Pipeline};
 
 use serde_json::{to_string, Value as JValue};
 use chrono::Utc;
 
-use crate::errors::*;
 use crate::server::{Signal, Operation};
 use crate::job::Job;
-use crate::job_handler::{JobHandler, JobHandlerResult};
-use crate::middleware::MiddleWare;
-use crate::RedisPool;
+use crate::job_handler::JobHandler;
 use crate::JobSuccessType;
 
 
 pub struct SidekiqWorker<'a> {
     pub id: String,
     server_id: String,
-    pool: RedisPool,
+    redis: ConnectionManager,
     namespace: String,
     queues: Vec<String>,
     handlers: BTreeMap<String, Box<dyn JobHandler + 'a>>,
-    middlewares: Vec<Box<dyn MiddleWare + 'a>>,
     tx: Sender<Signal>,
-    rx: Receiver<Operation>,
+    rx: Option<Receiver<Operation>>,
     processed: usize,
     failed: usize,
 }
 
 impl<'a> SidekiqWorker<'a> {
-    pub fn new(server_id: &str,
-               pool: RedisPool,
+    pub async fn new(server_id: &str,
+               redis_url: &str,
                tx: Sender<Signal>,
                rx: Receiver<Operation>,
                queues: Vec<String>,
                handlers: BTreeMap<String, Box<dyn JobHandler>>,
-               middlewares: Vec<Box<dyn MiddleWare>>,
                namespace: String)
                -> SidekiqWorker<'a> {
+
+        let redis = ConnectionManager::new(redis::Client::open(redis_url.clone()).unwrap()).await.unwrap();
 
         let mut rng = rand::thread_rng();
         let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(9).collect();
@@ -60,74 +59,76 @@ impl<'a> SidekiqWorker<'a> {
         SidekiqWorker {
             id: String::from_utf8_lossy(&identity).to_string(),
             server_id: server_id.into(),
-            pool,
+            redis,
             namespace,
             queues,
             handlers,
-            middlewares,
             tx,
-            rx,
+            rx: Some(rx),
             processed: 0,
             failed: 0,
         }
     }
 
-    pub fn work(mut self) {
+    pub async fn work(mut self) {
         info!("worker '{}' start working", self.with_server_id(&self.id));
-        // main loop is here
-        let rx = self.rx.clone();
-        let clock = tick(Duration::from_secs(1));
+        let rx = self.rx.take().unwrap();
+        let mut clock = time::interval(Duration::from_secs(1));
         loop {
+            debug!("/////");
             select! {
-                default => {
-                    debug!("{} run queue once", self.id);
-                    match self.run_queue_once() {
-                        Ok(true) => self.processed += 1,
-                        Ok(false) => {}
-                        Err(e) => {
-                            self.failed += 1;
-                            warn!("uncaught error '{}'", e);
+                biased;
+                Ok(op) = rx.recv() => {
+                    match op {
+                        Operation::Terminate => {
+                            info!("{} Terminate signal received, exiting...", self.id);
+                            self.tx.send(Signal::Terminated(self.id.clone())).await.ok();
+                            debug!("{} Terminate signal sent", self.id);
+                            return;
                         }
-                    };
-                },
-                recv(clock) -> _ => {
-                    // synchronize state
-                    debug!("{} syncing state", self.id);
-                    self.sync_state();
-                    debug!("{} syncing state done", self.id);
-                },
-                recv(rx) -> op => {
-                    if let Ok(Operation::Terminate) = op {
-                        info!("{} Terminate signal received, exiting...", self.id);
-                        self.tx.send(Signal::Terminated(self.id.clone())).ok();
-                        debug!("{} Terminate signal sent", self.id);
-                        return;
-                    } else {
-                        unimplemented!()
                     }
                 },
+                _ = clock.tick() => {
+                    debug!("{} syncing state", self.id);
+                    self.sync_state().await;
+                    debug!("{} syncing state done", self.id);
+                },
+            }
+            match self.run_queue_once().await {
+                Ok(true) => self.processed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    self.failed += 1;
+                    warn!("uncaught error '{}'", e);
+                }
             }
         }
     }
 
-
-    fn run_queue_once(&mut self) -> Result<bool> {
+    // Note: this blocks for the duration passed to `brpop`
+    async fn run_queue_once(&mut self) -> Result<bool> {
         let queues: Vec<String> = self.queues.iter().map(|q| self.queue_name(q)).collect();
 
-        let result: Option<(String, String)> = self.pool.get()?.brpop(queues, 10)?;
+        let mut result: Result<Option<(String, String)>> = Ok(None);
+        task::block_in_place(|| {
+            Handle::current().block_on(async {
+                result = self.redis.brpop(queues, 10).await.map_err(From::from);
+            });
+        });
+        let result = result?;
 
         if let Some((queue, job)) = result {
             debug!("{} job received for queue {}", self.id, queue);
             let mut job: Job = from_str(&job)?;
-            self.tx.send(Signal::Acquire(self.id.clone())).ok();
+            self.tx.send(Signal::Acquire(self.id.clone())).await.ok();
             if let Some(ref mut retry_info) = job.retry_info {
                 retry_info.retried_at = Some(Utc::now());
             }
 
             job.namespace = self.namespace.clone();
-            self.report_working(&job)?;
-            let r = self.perform(job)?;
-            self.report_done()?;
+            self.report_working(&job).await?;
+            let r = self.perform(job).await?;
+            self.report_done().await?;
             match r {
                 JobSuccessType::Ignore => Ok(false),
                 JobSuccessType::Success => Ok(true),
@@ -138,58 +139,35 @@ impl<'a> SidekiqWorker<'a> {
     }
 
 
-    fn perform(&mut self, job: Job) -> Result<JobSuccessType> {
+    async fn perform(&mut self, job: Job) -> Result<JobSuccessType> {
         debug!("{} {:?}", self.id, job);
 
         let mut handler = if let Some(handler) = self.handlers.get_mut(&job.class) {
             handler.cloned()
         } else {
             warn!("unknown job class '{}'", job.class);
-            return Err("unknown job class".into());
+            return Err(anyhow!("unknown job class"));
         };
 
-        match catch_unwind(AssertUnwindSafe(|| { self.call_middleware(job, |job| handler.handle(job)) })) {
+        let future = handler.handle(&job);
+        match AssertUnwindSafe(future).catch_unwind().await {
             Err(_) => {
                 error!("Worker '{}' panicked, recovering", self.id);
-                Err("Worker crashed".into())
+                Err(anyhow!("Worker crashed"))
             }
             Ok(r) => r,
         }
     }
 
-    fn call_middleware<F>(&mut self, mut job: Job, mut job_handle: F) -> Result<JobSuccessType>
-        where F: FnMut(&Job) -> JobHandlerResult
-    {
-        fn imp<'a, F: FnMut(&Job) -> JobHandlerResult>(job: &mut Job,
-                                                       redis: RedisPool,
-                                                       chain: &mut [Box<dyn MiddleWare + 'a>],
-                                                       job_handle: &mut F)
-                                                       -> Result<JobSuccessType> {
-            chain.split_first_mut()
-                .map(|(head, tail)| {
-                    head.handle(job,
-                                redis,
-                                &mut |job, redis| imp(job, redis, tail, job_handle))
-                })
-                .or_else(|| Some(job_handle(&job)))
-                .unwrap()
-        }
-
-        imp(&mut job,
-            self.pool.clone(),
-            &mut self.middlewares,
-            &mut job_handle)
-    }
-
-    fn sync_state(&mut self) {
+    async fn sync_state(&mut self) {
         if self.processed != 0 {
             debug!("{} sending complete signal", self.id);
-            self.tx.send(Signal::Complete(self.id.clone(), self.processed)).ok();
+            self.tx.send(Signal::Complete(self.id.clone(), self.processed)).await.ok();
             self.processed = 0;
         }
         if self.failed != 0 {
             debug!("{} sending fail signal", self.id);
-            self.tx.send(Signal::Fail(self.id.clone(), self.failed)).ok();
+            self.tx.send(Signal::Fail(self.id.clone(), self.failed)).await.ok();
             self.failed = 0;
         }
     }
@@ -197,28 +175,24 @@ impl<'a> SidekiqWorker<'a> {
     // Sidekiq dashboard reporting functions
 
 
-    fn report_working(&self, job: &Job) -> Result<()> {
-        let mut conn = self.pool.get()?;
+    async fn report_working(&mut self, job: &Job) -> Result<()> {
+        let worker_key = self.with_namespace(&self.with_server_id("workers"));
         let payload: JValue = json!({
             "queue": job.queue.clone(),
             "payload": job,
             "run_at": Utc::now().timestamp()
         });
-        let _: () = Pipeline::new().hset(&self.with_namespace(&self.with_server_id("workers")),
-                  &self.id,
-                  to_string(&payload).unwrap())
-            .expire(&self.with_namespace(&self.with_server_id("workers")), 5)
-            .query(&mut *conn)?;
+        Pipeline::new().hset(&worker_key, &self.id, to_string(&payload).unwrap())
+            .expire(&worker_key, 5)
+            .query_async(&mut self.redis).await?;
 
         Ok(())
     }
 
 
-    fn report_done(&self) -> Result<()> {
-        let _: () = self.pool
-            .get()?
-            .hdel(&self.with_namespace(&self.with_server_id("workers")),
-                  &self.id)?;
+    async fn report_done(&mut self) -> Result<()> {
+        let worker_key = self.with_namespace(&self.with_server_id("workers"));
+        self.redis.hdel(&worker_key, &self.id).await?;
         Ok(())
     }
 

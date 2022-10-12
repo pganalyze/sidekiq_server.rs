@@ -1,4 +1,6 @@
-use sidekiq_server::{error_handler, panic_handler, printer_handler, retry_middleware, SidekiqServer};
+use anyhow::anyhow;
+use log::*;
+use sidekiq_server::{SidekiqServer, Job, JobHandlerResult, JobSuccessType::*};
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug, Clone)]
@@ -36,22 +38,39 @@ fn main() {
         })
         .collect();
 
-    let mut server = SidekiqServer::new(&params.redis, params.concurrency).unwrap();
+    let runtime = {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(params.concurrency + 3);
+        builder.enable_all();
+        builder.build().unwrap()
+    };
+    runtime.handle().clone().block_on(async {
+        let mut server = SidekiqServer::new(&params.redis, params.concurrency).await.unwrap();
 
-    server.attach_handler("Printer", printer_handler);
-    server.attach_handler("Error", error_handler);
-    server.attach_handler("Panic", panic_handler);
+        server.attach_handler("DefaultJob", default_job);
+        server.attach_handler("FailingJob", failing_job);
+        server.attach_handler("PanickingJob", panicking_job);
 
-    server.attach_middleware(retry_middleware);
-    for (name, weight) in queues {
-        server.new_queue(&name, weight);
-    }
+        for (name, weight) in queues {
+            server.new_queue(&name, weight);
+        }
 
-    server.namespace = params.namespace;
-    server.force_quite_timeout = params.timeout;
-    start(server)
+        server.namespace = params.namespace;
+        server.force_quite_timeout = params.timeout;
+        server.start().await;
+        runtime.shutdown_background();
+    });
 }
 
-fn start(mut server: SidekiqServer) {
-    server.start();
+async fn default_job(job: &Job) -> JobHandlerResult {
+    info!("handling {:?}", job);
+    Ok(Success)
+}
+
+async fn failing_job(_job: &Job) -> JobHandlerResult {
+    Err(anyhow!("oh no"))
+}
+
+async fn panicking_job(_job: &Job) -> JobHandlerResult {
+    panic!("oh no")
 }
