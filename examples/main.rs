@@ -1,6 +1,7 @@
 use anyhow::anyhow;
+use async_trait::async_trait;
 use log::*;
-use sidekiq_server::{SidekiqServer, Job, JobHandlerResult, JobSuccessType::*};
+use sidekiq_server::{SidekiqServer, Job, JobHandler, JobHandlerResult, JobSuccessType::*};
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug, Clone)]
@@ -46,31 +47,46 @@ fn main() {
     };
     runtime.handle().clone().block_on(async {
         let mut server = SidekiqServer::new(&params.redis, params.concurrency).await.unwrap();
+        server.namespace = params.namespace;
+        server.force_quite_timeout = params.timeout;
 
-        server.attach_handler("DefaultJob", default_job);
-        server.attach_handler("FailingJob", failing_job);
-        server.attach_handler("PanickingJob", panicking_job);
+        server.attach_handler("DefaultJob", DefaultJob());
+        server.attach_handler("FailingJob", FailingJob());
+        server.attach_handler("PanickingJob", PanickingJob());
 
         for (name, weight) in queues {
             server.new_queue(&name, weight);
         }
 
-        server.namespace = params.namespace;
-        server.force_quite_timeout = params.timeout;
         server.start().await;
         runtime.shutdown_background();
     });
 }
 
-async fn default_job(job: &Job) -> JobHandlerResult {
-    info!("handling {:?}", job);
-    Ok(Success)
+pub struct DefaultJob();
+
+#[async_trait]
+impl JobHandler for DefaultJob {
+    async fn perform(&self, job: &Job) -> JobHandlerResult {
+        info!("handling {:?}", job);
+        Ok(Success)
+    }
 }
 
-async fn failing_job(_job: &Job) -> JobHandlerResult {
-    Err(anyhow!("oh no"))
+pub struct FailingJob();
+
+#[async_trait]
+impl JobHandler for FailingJob {
+    async fn perform(&self, _job: &Job) -> JobHandlerResult {
+        Err(anyhow!("oh no"))
+    }
 }
 
-async fn panicking_job(_job: &Job) -> JobHandlerResult {
-    panic!("oh no")
+pub struct PanickingJob();
+
+#[async_trait]
+impl JobHandler for PanickingJob {
+    async fn perform(&self, _job: &Job) -> JobHandlerResult {
+        panic!("oh no")
+    }
 }

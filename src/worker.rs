@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::iter;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use futures::future::FutureExt;
@@ -18,32 +19,31 @@ use chrono::Utc;
 
 use crate::server::{Signal, Operation};
 use crate::job::Job;
-use crate::job_handler::JobHandler;
-use crate::JobSuccessType;
+use crate::*;
 
 
-pub struct SidekiqWorker<'a> {
+pub struct SidekiqWorker {
     pub id: String,
     server_id: String,
     redis: ConnectionManager,
     namespace: String,
     queues: Vec<String>,
-    handlers: BTreeMap<String, Box<dyn JobHandler + 'a>>,
+    handlers: BTreeMap<String, Arc<Box<dyn JobHandler>>>,
     tx: Sender<Signal>,
     rx: Option<Receiver<Operation>>,
     processed: usize,
     failed: usize,
 }
 
-impl<'a> SidekiqWorker<'a> {
+impl SidekiqWorker {
     pub async fn new(server_id: &str,
                redis_url: &str,
                tx: Sender<Signal>,
                rx: Receiver<Operation>,
                queues: Vec<String>,
-               handlers: BTreeMap<String, Box<dyn JobHandler>>,
+               handlers: BTreeMap<String, Arc<Box<dyn JobHandler>>>,
                namespace: String)
-               -> SidekiqWorker<'a> {
+               -> SidekiqWorker {
 
         let redis = ConnectionManager::new(redis::Client::open(redis_url.clone()).unwrap()).await.unwrap();
 
@@ -75,7 +75,6 @@ impl<'a> SidekiqWorker<'a> {
         let rx = self.rx.take().unwrap();
         let mut clock = time::interval(Duration::from_secs(1));
         loop {
-            debug!("/////");
             select! {
                 biased;
                 Ok(op) = rx.recv() => {
@@ -142,14 +141,14 @@ impl<'a> SidekiqWorker<'a> {
     async fn perform(&mut self, job: Job) -> Result<JobSuccessType> {
         debug!("{} {:?}", self.id, job);
 
-        let mut handler = if let Some(handler) = self.handlers.get_mut(&job.class) {
-            handler.cloned()
+        let handler = if let Some(handler) = self.handlers.get_mut(&job.class) {
+            handler
         } else {
             warn!("unknown job class '{}'", job.class);
             return Err(anyhow!("unknown job class"));
         };
 
-        let future = handler.handle(&job);
+        let future = handler.perform(&job);
         match AssertUnwindSafe(future).catch_unwind().await {
             Err(_) => {
                 error!("Worker '{}' panicked, recovering", self.id);

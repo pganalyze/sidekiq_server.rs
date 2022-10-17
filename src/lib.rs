@@ -11,7 +11,7 @@ mod job;
 mod worker;
 
 pub use server::SidekiqServer;
-pub use job_handler::JobHandlerResult;
+pub use job_handler::{JobHandler, JobHandlerResult};
 pub use job::{Job, RetryInfo};
 
 #[derive(Debug, Clone)]

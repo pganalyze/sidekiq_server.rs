@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::iter;
+use std::sync::Arc;
 
 use anyhow::Result;
 use redis::{aio::ConnectionManager, Pipeline};
@@ -19,7 +20,7 @@ use serde_json::to_string;
 
 use crate::worker::SidekiqWorker;
 use gethostname::gethostname;
-use crate::job_handler::JobHandler;
+use crate::*;
 
 #[derive(Debug)]
 pub enum Signal {
@@ -37,7 +38,7 @@ pub struct SidekiqServer {
     redis_url: String,
     redis: ConnectionManager,
     pub namespace: String,
-    job_handlers: BTreeMap<String, Box<dyn JobHandler>>,
+    job_handlers: BTreeMap<String, Arc<Box<dyn JobHandler>>>,
     queues: Vec<String>,
     started_at: f64,
     rs: String,
@@ -82,8 +83,8 @@ impl SidekiqServer {
         }
     }
 
-    pub fn attach_handler<T: JobHandler + 'static>(&mut self, name: &str, handle: T) {
-        self.job_handlers.insert(name.into(), Box::new(handle));
+    pub fn attach_handler(&mut self, name: &str, handle: impl JobHandler + 'static) {
+        self.job_handlers.insert(name.into(), Arc::new(Box::new(handle)));
     }
 
     pub async fn start(&mut self) {
@@ -167,7 +168,7 @@ impl SidekiqServer {
                                         self.queues.clone(),
                                         self.job_handlers
                                             .iter_mut()
-                                            .map(|(k, v)| (k.clone(), v.cloned()))
+                                            .map(|(k, v)| (k.clone(), v.clone()))
                                             .collect(),
                                         self.namespace.clone()).await;
         self.worker_info.insert(worker.id.clone(), false);
