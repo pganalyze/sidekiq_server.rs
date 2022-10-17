@@ -20,7 +20,7 @@ futures = "0.3.24"
 gethostname = "0.2.3"
 log = "0.4.17"
 rand = "0.8.5"
-redis = { version = "0.21.5", features = ["connection-manager", "tokio-comp"] }
+redis = { version = "0.21.5", features = ["connection-manager", "tokio-comp", "tokio-native-tls-comp"] }
 serde = "1.0.137"
 serde_json = "1.0.81"
 tokio = { version = "1.21.1", features = ["full"] }
