@@ -104,7 +104,6 @@ impl SidekiqServer {
         let (tox2, rsx2) = (tox.clone(), rsx.clone());
         let mut clock = time::interval(Duration::from_secs(2));
         loop {
-            debug!("//");
             if let Err(e) = self.report_alive().await {
                 error!("report alive failed: '{}'", e);
             }
