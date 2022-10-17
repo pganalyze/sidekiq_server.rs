@@ -110,7 +110,6 @@ impl SidekiqServer {
             select! {
                 biased;
                 signal = signal.recv() => {
-                    info!("--- {:?}", signal);
                     match signal {
                         Ok(signal @ SIGUSR1) => {
                             info!("{:?}: Terminating", signal);
