@@ -9,7 +9,7 @@ use rand::{Rng, distributions};
 
 use async_channel::{bounded, Receiver, Sender};
 
-use tokio::{select, time::{self, sleep, Duration}};
+use tokio::{select, time::{self, sleep, Duration, MissedTickBehavior}};
 
 use signal_hook::consts::{SIGINT, SIGUSR1};
 use std::os::raw::c_int;
@@ -103,6 +103,7 @@ impl SidekiqServer {
         // controller loop
         let (tox2, rsx2) = (tox.clone(), rsx.clone());
         let mut clock = time::interval(Duration::from_secs(2));
+        clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             if let Err(e) = self.report_alive().await {
                 error!("report alive failed: '{}'", e);

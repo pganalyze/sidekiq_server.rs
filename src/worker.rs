@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::iter;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use futures::future::FutureExt;
@@ -9,7 +10,7 @@ use rand::{Rng, distributions, seq::SliceRandom};
 
 use async_channel::{Receiver, Sender};
 
-use tokio::{runtime::Handle, select, task, time::{self, Duration}};
+use tokio::{runtime::Handle, task};
 
 use serde_json::from_str;
 use redis::{aio::ConnectionManager, AsyncCommands, Pipeline};
@@ -30,7 +31,7 @@ pub struct SidekiqWorker {
     queues: Vec<String>,
     handlers: BTreeMap<String, Arc<Box<dyn JobHandler>>>,
     tx: Sender<Signal>,
-    rx: Option<Receiver<Operation>>,
+    rx: Receiver<Operation>,
     processed: usize,
     failed: usize,
 }
@@ -64,7 +65,7 @@ impl SidekiqWorker {
             queues,
             handlers,
             tx,
-            rx: Some(rx),
+            rx,
             processed: 0,
             failed: 0,
         }
@@ -72,46 +73,44 @@ impl SidekiqWorker {
 
     pub async fn work(mut self) {
         info!("worker '{}' start working", self.with_server_id(&self.id));
-        let rx = self.rx.take().unwrap();
-        let mut clock = time::interval(Duration::from_secs(1));
+        let mut last_sync = Instant::now();
         loop {
-            select! {
-                biased;
-                Ok(op) = rx.recv() => {
-                    match op {
-                        Operation::Terminate => {
-                            info!("{} Terminate signal received, exiting...", self.id);
-                            self.tx.send(Signal::Terminated(self.id.clone())).await.ok();
-                            debug!("{} Terminate signal sent", self.id);
-                            return;
-                        }
-                    }
-                },
-                _ = clock.tick() => {
-                    debug!("{} syncing state", self.id);
-                    self.sync_state().await;
-                    debug!("{} syncing state done", self.id);
-                },
+            match self.rx.try_recv() {
+                Ok(Operation::Terminate) => {
+                    info!("{} Terminate signal received, exiting...", self.id);
+                    self.tx.send(Signal::Terminated(self.id.clone())).await.ok();
+                    debug!("{} Terminate signal sent", self.id);
+                    return;
+                }
+                _ => (),
             }
+
+            // Note: this blocks for 1 second if no job is available in Redis
             match self.run_queue_once().await {
                 Ok(true) => self.processed += 1,
-                Ok(false) => {}
+                Ok(false) => (),
                 Err(e) => {
                     self.failed += 1;
                     warn!("uncaught error '{}'", e);
                 }
             }
+
+            if last_sync.elapsed().as_secs() >= 1 {
+                last_sync = Instant::now();
+                debug!("{} syncing state", self.id);
+                self.sync_state().await;
+                debug!("{} syncing state done", self.id);
+            }
         }
     }
 
-    // Note: this blocks for the duration passed to `brpop`
     async fn run_queue_once(&mut self) -> Result<bool> {
         let queues: Vec<String> = self.queues.iter().map(|q| self.queue_name(q)).collect();
 
         let mut result: Result<Option<(String, String)>> = Ok(None);
         task::block_in_place(|| {
             Handle::current().block_on(async {
-                result = self.redis.brpop(queues, 10).await.map_err(From::from);
+                result = self.redis.brpop(queues, 1).await.map_err(From::from);
             });
         });
         let result = result?;
