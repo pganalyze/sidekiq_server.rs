@@ -10,8 +10,6 @@ use rand::{Rng, distributions, seq::SliceRandom};
 
 use async_channel::{Receiver, Sender};
 
-use tokio::{runtime::Handle, task};
-
 use serde_json::from_str;
 use redis::{aio::ConnectionManager, AsyncCommands, Pipeline};
 
@@ -107,13 +105,7 @@ impl SidekiqWorker {
     async fn run_queue_once(&mut self) -> Result<bool> {
         let queues: Vec<String> = self.queues.iter().map(|q| self.queue_name(q)).collect();
 
-        let mut result: Result<Option<(String, String)>> = Ok(None);
-        task::block_in_place(|| {
-            Handle::current().block_on(async {
-                result = self.redis.brpop(queues, 1).await.map_err(From::from);
-            });
-        });
-        let result = result?;
+        let result: Option<(String, String)> = self.redis.brpop(queues, 1).await?;
 
         if let Some((queue, job)) = result {
             debug!("{} job received for queue {}", self.id, queue);
