@@ -1,4 +1,7 @@
-use sidekiq_server::{error_handler, panic_handler, printer_handler, retry_middleware, SidekiqServer};
+use anyhow::anyhow;
+use async_trait::async_trait;
+use log::*;
+use sidekiq_server::{SidekiqServer, Job, JobHandler, JobHandlerResult, JobSuccessType::*};
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug, Clone)]
@@ -36,22 +39,54 @@ fn main() {
         })
         .collect();
 
-    let mut server = SidekiqServer::new(&params.redis, params.concurrency).unwrap();
+    let runtime = {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(params.concurrency + 3);
+        builder.enable_all();
+        builder.build().unwrap()
+    };
+    runtime.handle().clone().block_on(async {
+        let mut server = SidekiqServer::new(&params.redis, params.concurrency).await.unwrap();
+        server.namespace = params.namespace;
+        server.force_quite_timeout = params.timeout;
 
-    server.attach_handler("Printer", printer_handler);
-    server.attach_handler("Error", error_handler);
-    server.attach_handler("Panic", panic_handler);
+        server.attach_handler("DefaultJob", DefaultJob());
+        server.attach_handler("FailingJob", FailingJob());
+        server.attach_handler("PanickingJob", PanickingJob());
 
-    server.attach_middleware(retry_middleware);
-    for (name, weight) in queues {
-        server.new_queue(&name, weight);
-    }
+        for (name, weight) in queues {
+            server.new_queue(&name, weight);
+        }
 
-    server.namespace = params.namespace;
-    server.force_quite_timeout = params.timeout;
-    start(server)
+        server.start().await;
+        runtime.shutdown_background();
+    });
 }
 
-fn start(mut server: SidekiqServer) {
-    server.start();
+pub struct DefaultJob();
+
+#[async_trait]
+impl JobHandler for DefaultJob {
+    async fn perform(&self, job: &Job) -> JobHandlerResult {
+        info!("handling {:?}", job);
+        Ok(Success)
+    }
+}
+
+pub struct FailingJob();
+
+#[async_trait]
+impl JobHandler for FailingJob {
+    async fn perform(&self, _job: &Job) -> JobHandlerResult {
+        Err(anyhow!("oh no"))
+    }
+}
+
+pub struct PanickingJob();
+
+#[async_trait]
+impl JobHandler for PanickingJob {
+    async fn perform(&self, _job: &Job) -> JobHandlerResult {
+        panic!("oh no")
+    }
 }
