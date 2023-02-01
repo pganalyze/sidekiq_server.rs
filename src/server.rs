@@ -54,19 +54,24 @@ pub struct SidekiqServer<'a> {
 impl<'a> SidekiqServer<'a> {
     // Interfaces to be exposed
 
-    pub fn new(redis: &str, concurrency: usize) -> Result<Self> {
+    pub fn new(redis: &str, concurrency: usize, stack_size: usize) -> Result<Self> {
         let signal_chan = signal_listen(&[SIGINT, SIGUSR1])?;
         let now = Utc::now();
-        let pool = r2d2::Pool::builder()
+        let redispool = r2d2::Pool::builder()
             .max_size(concurrency as u32 + 3)
             .build(redis::Client::open(redis)?)?;
+        let threadpool = threadpool::Builder::new()
+            .thread_name("worker".to_string())
+            .num_threads(concurrency)
+            .thread_stack_size(stack_size)
+            .build();
 
         let mut rng = rand::thread_rng();
         let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(12).collect();
 
         Ok(SidekiqServer {
-            redispool: pool,
-            threadpool: ThreadPool::with_name("worker".into(), concurrency),
+            redispool,
+            threadpool,
             namespace: String::new(),
             job_handlers: BTreeMap::new(),
             queues: vec![],
