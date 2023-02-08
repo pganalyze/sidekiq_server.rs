@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::iter;
 use std::time::Duration;
 
@@ -48,6 +48,7 @@ pub struct SidekiqServer<'a> {
     signal_chan: Receiver<c_int>,
     worker_info: BTreeMap<String, bool>, // busy?
     concurrency: usize,
+    pub queue_shuffle: bool,
     pub force_quite_timeout: usize,
 }
 
@@ -75,6 +76,7 @@ impl<'a> SidekiqServer<'a> {
             worker_info: BTreeMap::new(),
             concurrency,
             signal_chan,
+            queue_shuffle: true,
             force_quite_timeout: 10,
             middlewares: vec![],
             rs: String::from_utf8_lossy(&identity).to_string(),
@@ -172,6 +174,7 @@ impl<'a> SidekiqServer<'a> {
                                         tsx,
                                         rox,
                                         self.queues.clone(),
+                                        self.queue_shuffle,
                                         self.job_handlers
                                             .iter_mut()
                                             .map(|(k, v)| (k.clone(), v.cloned()))
@@ -261,14 +264,14 @@ impl<'a> SidekiqServer<'a> {
 
     fn report_alive(&mut self) -> Result<()> {
         let now = Utc::now();
-
+        let queues: Vec<_> = self.queues.iter().collect::<HashSet<_>>().into_iter().collect();
         let content = vec![("info",
                             to_string(&json!({
                                 "hostname": self.hostname(),
                                 "started_at": self.started_at,
                                 "pid": self.pid,
                                 "concurrency": self.concurrency,
-                                "queues": self.queues.clone(),
+                                "queues": queues,
                                 "labels": [],
                                 "identity": self.identity()
                             }))

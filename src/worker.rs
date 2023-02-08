@@ -42,20 +42,22 @@ impl<'a> SidekiqWorker<'a> {
                pool: RedisPool,
                tx: Sender<Signal>,
                rx: Receiver<Operation>,
-               queues: Vec<String>,
+               mut queues: Vec<String>,
+               queue_shuffle: bool,
                handlers: BTreeMap<String, Box<dyn JobHandler>>,
                middlewares: Vec<Box<dyn MiddleWare>>,
                namespace: String)
                -> SidekiqWorker<'a> {
 
         let mut rng = rand::thread_rng();
-        let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(9).collect();
+        let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(6).collect();
 
-        // 1. randomize the queue list (which is filled with duplicates based on priority)
-        let mut queues = queues.clone();
-        queues.shuffle(&mut rng);
-        // 2. remove duplicates. this ensures that some workers will prefer low-priority queues
-        let queues = queues.into_iter().collect::<HashSet<String>>().into_iter().collect();
+        // Randomize the queue list (which is filled with duplicates based on priority)
+        // This ensures some workers will prefer low-priority queues to avoid queue starvation
+        if queue_shuffle {
+            queues.shuffle(&mut rng);
+        }
+        queues = queues.into_iter().collect::<HashSet<_>>().into_iter().collect();
 
         SidekiqWorker {
             id: String::from_utf8_lossy(&identity).to_string(),
