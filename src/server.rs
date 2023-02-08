@@ -37,7 +37,7 @@ pub enum Operation {
 
 pub struct SidekiqServer<'a> {
     redispool: RedisPool,
-    threadpool: ThreadPool,
+    threadpool: Option<ThreadPool>,
     pub namespace: String,
     job_handlers: BTreeMap<String, Box<dyn JobHandler + 'a>>,
     middlewares: Vec<Box<dyn MiddleWare + 'a>>,
@@ -48,30 +48,26 @@ pub struct SidekiqServer<'a> {
     signal_chan: Receiver<c_int>,
     worker_info: BTreeMap<String, bool>, // busy?
     concurrency: usize,
+    pub stack_size: Option<usize>,
     pub force_quite_timeout: usize,
 }
 
 impl<'a> SidekiqServer<'a> {
     // Interfaces to be exposed
 
-    pub fn new(redis: &str, concurrency: usize, stack_size: usize) -> Result<Self> {
+    pub fn new(redis: &str, concurrency: usize) -> Result<Self> {
         let signal_chan = signal_listen(&[SIGINT, SIGUSR1])?;
         let now = Utc::now();
         let redispool = r2d2::Pool::builder()
             .max_size(concurrency as u32 + 3)
             .build(redis::Client::open(redis)?)?;
-        let threadpool = threadpool::Builder::new()
-            .thread_name("worker".to_string())
-            .num_threads(concurrency)
-            .thread_stack_size(stack_size)
-            .build();
 
         let mut rng = rand::thread_rng();
         let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(12).collect();
 
         Ok(SidekiqServer {
             redispool,
-            threadpool,
+            threadpool: None,
             namespace: String::new(),
             job_handlers: BTreeMap::new(),
             queues: vec![],
@@ -80,6 +76,7 @@ impl<'a> SidekiqServer<'a> {
             worker_info: BTreeMap::new(),
             concurrency,
             signal_chan,
+            stack_size: None,
             force_quite_timeout: 10,
             middlewares: vec![],
             rs: String::from_utf8_lossy(&identity).to_string(),
@@ -101,6 +98,14 @@ impl<'a> SidekiqServer<'a> {
     }
 
     pub fn start(&mut self) {
+        let mut threadpool = threadpool::Builder::new()
+            .thread_name("worker".to_string())
+            .num_threads(self.concurrency);
+        if let Some(size) = self.stack_size {
+            threadpool = threadpool.thread_stack_size(size);
+        }
+        self.threadpool = Some(threadpool.build());
+
         info!("sidekiq is running...");
         if self.queues.len() == 0 {
             error!("queue is empty, exiting");
@@ -145,7 +150,7 @@ impl<'a> SidekiqServer<'a> {
                     if let Ok(Err(e)) = sig.map(|s| self.deal_signal(s)) {
                         error!("error when dealing signal: '{}'", e);
                     }
-                    let worker_count = self.threadpool.active_count();
+                    let worker_count = self.threadpool.as_ref().unwrap().active_count();
                     // relaunch workers if they died unexpectly
                     if worker_count < self.concurrency {
                         warn!("worker down, restarting");
@@ -184,7 +189,7 @@ impl<'a> SidekiqServer<'a> {
                                         self.middlewares.iter_mut().map(|v| v.cloned()).collect(),
                                         self.namespace.clone());
         self.worker_info.insert(worker.id.clone(), false);
-        self.threadpool.execute(move || worker.work());
+        self.threadpool.as_ref().unwrap().execute(move || worker.work());
     }
 
     fn inform_termination(&self, tox: Sender<Operation>) {
