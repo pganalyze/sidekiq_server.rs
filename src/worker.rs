@@ -35,6 +35,7 @@ pub struct SidekiqWorker<'a> {
     rx: Receiver<Operation>,
     processed: usize,
     failed: usize,
+    pause_if: Option<fn() -> bool>,
 }
 
 impl<'a> SidekiqWorker<'a> {
@@ -46,7 +47,8 @@ impl<'a> SidekiqWorker<'a> {
                queue_shuffle: bool,
                handlers: BTreeMap<String, Box<dyn JobHandler>>,
                middlewares: Vec<Box<dyn MiddleWare>>,
-               namespace: String)
+               namespace: String,
+               pause_if: Option<fn() -> bool>)
                -> SidekiqWorker<'a> {
 
         let mut rng = rand::thread_rng();
@@ -71,6 +73,7 @@ impl<'a> SidekiqWorker<'a> {
             rx,
             processed: 0,
             failed: 0,
+            pause_if,
         }
     }
 
@@ -114,8 +117,12 @@ impl<'a> SidekiqWorker<'a> {
 
 
     fn run_queue_once(&mut self) -> Result<bool> {
-        let queues: Vec<String> = self.queues.iter().map(|q| self.queue_name(q)).collect();
+        if self.pause_if.map(|f| f()) == Some(true) {
+            std::thread::sleep(Duration::from_secs(10));
+            return Ok(false);
+        }
 
+        let queues: Vec<String> = self.queues.iter().map(|q| self.queue_name(q)).collect();
         let result: Option<(String, String)> = self.pool.get()?.brpop(queues, 10)?;
 
         if let Some((queue, job)) = result {
