@@ -50,6 +50,7 @@ pub struct SidekiqServer<'a> {
     concurrency: usize,
     pub queue_shuffle: bool,
     pub force_quite_timeout: usize,
+    pub pause_if: Option<fn() -> bool>,
 }
 
 impl<'a> SidekiqServer<'a> {
@@ -78,6 +79,7 @@ impl<'a> SidekiqServer<'a> {
             signal_chan,
             queue_shuffle: true,
             force_quite_timeout: 10,
+            pause_if: None,
             middlewares: vec![],
             rs: String::from_utf8_lossy(&identity).to_string(),
         })
@@ -180,7 +182,8 @@ impl<'a> SidekiqServer<'a> {
                                             .map(|(k, v)| (k.clone(), v.cloned()))
                                             .collect(),
                                         self.middlewares.iter_mut().map(|v| v.cloned()).collect(),
-                                        self.namespace.clone());
+                                        self.namespace.clone(),
+                                        self.pause_if);
         self.worker_info.insert(worker.id.clone(), false);
         self.threadpool.execute(move || worker.work());
     }
