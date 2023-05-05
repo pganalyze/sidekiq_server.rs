@@ -59,7 +59,9 @@ impl<'a> SidekiqWorker<'a> {
         if queue_shuffle {
             queues.shuffle(&mut rng);
         }
-        queues = queues.into_iter().collect::<HashSet<_>>().into_iter().collect();
+        // Remove duplicates from the queue list
+        let mut seen = HashSet::new();
+        queues.retain(|q| seen.insert(q.clone()));
 
         SidekiqWorker {
             id: String::from_utf8_lossy(&identity).to_string(),
