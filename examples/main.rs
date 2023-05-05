@@ -46,6 +46,7 @@ fn main() {
     for (name, weight) in queues {
         server.new_queue(&name, weight);
     }
+    server.new_queue_limited("limited", 1, 1);
 
     server.namespace = params.namespace;
     server.force_quite_timeout = params.timeout;
