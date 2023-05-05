@@ -42,6 +42,7 @@ pub struct SidekiqServer<'a> {
     job_handlers: BTreeMap<String, Box<dyn JobHandler + 'a>>,
     middlewares: Vec<Box<dyn MiddleWare + 'a>>,
     queues: Vec<String>,
+    limited_queues: Vec<(String, u32, u32)>,
     started_at: f64,
     rs: String,
     pid: u32,
@@ -72,6 +73,7 @@ impl<'a> SidekiqServer<'a> {
             namespace: String::new(),
             job_handlers: BTreeMap::new(),
             queues: vec![],
+            limited_queues: vec![],
             started_at: now.timestamp() as f64 + now.timestamp_subsec_micros() as f64 / 1000000f64,
             pid: std::process::id(),
             worker_info: BTreeMap::new(),
@@ -89,6 +91,12 @@ impl<'a> SidekiqServer<'a> {
         for _ in 0..weight {
             self.queues.push(name.into());
         }
+    }
+
+    /// Registers a queue that will have a limited number of worker threads assigned to it.
+    /// This acts as a simple rate limit for expensive jobs to avoid running out of memory.
+    pub fn new_queue_limited(&mut self, name: &str, weight: u32, thread_limit: u32) {
+        self.limited_queues.push((name.into(), weight, thread_limit));
     }
 
     pub fn attach_handler<T: JobHandler + 'a>(&mut self, name: &str, handle: T) {
@@ -171,6 +179,15 @@ impl<'a> SidekiqServer<'a> {
 
 
     fn launch_worker(&mut self, tsx: Sender<Signal>, rox: Receiver<Operation>) {
+        let mut queues = self.queues.clone();
+        for (name, weight, limit) in &mut self.limited_queues {
+            if *limit > 0 {
+                *limit -= 1;
+                for _ in 0..*weight {
+                    queues.push(name.clone());
+                }
+            }
+        }
         let worker = SidekiqWorker::new(&self.identity(),
                                         self.redispool.clone(),
                                         tsx,
