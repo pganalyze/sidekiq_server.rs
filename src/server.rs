@@ -9,7 +9,7 @@ use rand::{Rng, distributions};
 use threadpool::ThreadPool;
 
 use crossbeam_channel::{after, tick, Receiver, Sender};
-use signal_hook::consts::{SIGINT, SIGUSR1};
+use signal_hook::consts::{SIGINT, SIGTERM, SIGUSR1};
 use std::os::raw::c_int;
 
 use chrono::Utc;
@@ -57,7 +57,7 @@ impl<'a> SidekiqServer<'a> {
     // Interfaces to be exposed
 
     pub fn new(redis: &str, concurrency: usize) -> Result<Self> {
-        let signal_chan = signal_listen(&[SIGINT, SIGUSR1])?;
+        let signal_chan = signal_listen(&[SIGINT, SIGTERM, SIGUSR1])?;
         let now = Utc::now();
         let pool = r2d2::Pool::builder()
             .max_size(concurrency as u32 + 3)
@@ -127,7 +127,7 @@ impl<'a> SidekiqServer<'a> {
                             self.terminate_gracefully(tox2, rsx2);
                             break;
                         }
-                        Ok(signal @ SIGINT) => {
+                        Ok(signal @ SIGINT) | Ok(signal @ SIGTERM) => {
                             info!("{:?}: Force terminating", signal);                            
                             self.terminate_forcely(tox2, rsx2);
                             break;
