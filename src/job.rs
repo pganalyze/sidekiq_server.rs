@@ -1,12 +1,10 @@
-use std::collections::BTreeMap;
-use std::iter::FromIterator;
-
-use serde_json::{Value as JValue, Map as JMap};
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
+use chrono::{DateTime, Utc};
 use serde::de::Error;
 use serde::ser::SerializeMap;
-
-use chrono::{DateTime, Utc};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map as JMap, Value as JValue};
+use std::collections::BTreeMap;
+use std::iter::FromIterator;
 
 #[derive(Debug, Clone)]
 pub enum BoolOrUSize {
@@ -45,7 +43,8 @@ impl Job {
 
 impl<'de> Deserialize<'de> for Job {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         let j = <JValue as Deserialize>::deserialize(deserializer)?;
         if let JValue::Object(mut obj) = j {
@@ -53,13 +52,16 @@ impl<'de> Deserialize<'de> for Job {
             let args = JMapExt::<D>::remove_vec(&mut obj, "args")?;
             let queue = JMapExt::<D>::remove_string(&mut obj, "queue")?;
             let jid = JMapExt::<D>::remove_string(&mut obj, "jid")?;
-            let retry = obj.remove("retry")
-                .and_then(|r| if r.is_u64() {
-                    Some(BoolOrUSize::USize(r.as_u64().unwrap() as usize))
-                } else if r.is_boolean() {
-                    Some(BoolOrUSize::Bool(r.as_bool().unwrap()))
-                } else {
-                    None
+            let retry = obj
+                .remove("retry")
+                .and_then(|r| {
+                    if r.is_u64() {
+                        Some(BoolOrUSize::USize(r.as_u64().unwrap() as usize))
+                    } else if r.is_boolean() {
+                        Some(BoolOrUSize::Bool(r.as_bool().unwrap()))
+                    } else {
+                        None
+                    }
                 })
                 .ok_or(D::Error::custom("no member 'retry'"))?;
             let created_at = JMapExt::<D>::remove_datetime(&mut obj, "created_at").ok();
@@ -106,7 +108,8 @@ impl<'de> Deserialize<'de> for Job {
 
 impl Serialize for Job {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: Serializer
+    where
+        S: Serializer,
     {
         let mut map_serializer = serializer.serialize_map(None)?;
 
@@ -117,14 +120,12 @@ impl Serialize for Job {
 
         self.created_at
             .map(|created_at| {
-                let timestamp = created_at.timestamp() as f64 +
-                                created_at.timestamp_subsec_nanos() as f64 / 1e9;
+                let timestamp = created_at.timestamp() as f64 + created_at.timestamp_subsec_nanos() as f64 / 1e9;
                 map_serializer.serialize_entry("created_at", &timestamp)
             })
             .unwrap_or(Ok(()))?;
 
-        let enqueued_at = self.enqueued_at.timestamp() as f64 +
-                          self.enqueued_at.timestamp_subsec_nanos() as f64 / 1e9;
+        let enqueued_at = self.enqueued_at.timestamp() as f64 + self.enqueued_at.timestamp_subsec_nanos() as f64 / 1e9;
         map_serializer.serialize_entry("enqueued_at", &enqueued_at)?;
 
         self.at
@@ -147,12 +148,10 @@ impl Serialize for Job {
             map_serializer.serialize_entry("error_backtrace", &retry_info.error_backtrace)?;
             map_serializer.serialize_entry("error_class", &retry_info.error_class)?;
             map_serializer.serialize_entry("error_message", &retry_info.error_message)?;
-            let failed_at = retry_info.failed_at.timestamp() as f64 +
-                            retry_info.failed_at.timestamp_subsec_nanos() as f64 / 1e9;
+            let failed_at = retry_info.failed_at.timestamp() as f64 + retry_info.failed_at.timestamp_subsec_nanos() as f64 / 1e9;
             map_serializer.serialize_entry("failed_at", &failed_at)?;
             retry_info.retried_at.map(|retried_at| {
-                let retried_at = retried_at.timestamp() as f64 +
-                                 retried_at.timestamp_subsec_nanos() as f64 / 1e9;
+                let retried_at = retried_at.timestamp() as f64 + retried_at.timestamp_subsec_nanos() as f64 / 1e9;
                 map_serializer.serialize_entry("retried_at", &retried_at)
             });
             map_serializer.serialize_entry("retry_count", &retry_info.retry_count)?;
@@ -162,7 +161,6 @@ impl Serialize for Job {
         }
 
         map_serializer.end()
-
     }
 }
 
@@ -177,7 +175,8 @@ pub struct RetryInfo {
 }
 
 trait JMapExt<'a, D>
-    where D: Deserializer<'a>
+where
+    D: Deserializer<'a>,
 {
     fn remove_datetime(&mut self, key: &str) -> Result<DateTime<Utc>, D::Error>;
     fn remove_string(&mut self, key: &str) -> Result<String, D::Error>;
@@ -187,7 +186,8 @@ trait JMapExt<'a, D>
 }
 
 impl<'a, D> JMapExt<'a, D> for JMap<String, JValue>
-    where D: Deserializer<'a>
+where
+    D: Deserializer<'a>,
 {
     fn remove_datetime(&mut self, key: &str) -> Result<DateTime<Utc>, D::Error> {
         self.remove(key)
@@ -208,23 +208,20 @@ impl<'a, D> JMapExt<'a, D> for JMap<String, JValue>
     fn remove_svec(&mut self, key: &str) -> Result<Vec<String>, D::Error> {
         let value = self.remove(key);
         match value {
-            Some(JValue::Array(v)) => {
-                v.into_iter()
-                    .map(|e| match e {
-                        JValue::String(s) => Ok(s),
-                        _ => Err(D::Error::custom(format!("'{}' contains non string", key))),
-                    })
-                    .collect()
-            }
+            Some(JValue::Array(v)) => v
+                .into_iter()
+                .map(|e| match e {
+                    JValue::String(s) => Ok(s),
+                    _ => Err(D::Error::custom(format!("'{}' contains non string", key))),
+                })
+                .collect(),
             Some(_) => Err(D::Error::custom(format!("'{}' not a array", key))),
             None => Err(D::Error::custom(format!("no member '{}'", key))),
         }
     }
 
     fn remove_string(&mut self, key: &str) -> Result<String, D::Error> {
-        self.remove(key)
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .ok_or(D::Error::custom(format!("no member '{}'", key)))
+        self.remove(key).and_then(|v| v.as_str().map(|s| s.to_string())).ok_or(D::Error::custom(format!("no member '{}'", key)))
     }
 
     fn remove_usize(&mut self, key: &str) -> Result<usize, D::Error> {

@@ -1,27 +1,21 @@
+use crate::errors::*;
+use crate::job::Job;
+use crate::job_handler::{JobHandler, JobHandlerResult};
+use crate::middleware::MiddleWare;
+use crate::server::{Operation, Signal};
+use crate::JobSuccessType;
+use crate::RedisPool;
+use chrono::Utc;
+use crossbeam_channel::{tick, Receiver, Sender};
+use rand::{distributions, seq::SliceRandom, Rng};
+use redis::Commands;
+use redis::Pipeline;
+use serde_json::from_str;
+use serde_json::{to_string, Value as JValue};
 use std::collections::{BTreeMap, HashSet};
 use std::iter;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
-
-use rand::{Rng, distributions, seq::SliceRandom};
-
-use crossbeam_channel::{Sender, Receiver, tick};
-
-use serde_json::from_str;
-use redis::{Pipeline};
-use redis::Commands;
-
-use serde_json::{to_string, Value as JValue};
-use chrono::Utc;
-
-use crate::errors::*;
-use crate::server::{Signal, Operation};
-use crate::job::Job;
-use crate::job_handler::{JobHandler, JobHandlerResult};
-use crate::middleware::MiddleWare;
-use crate::RedisPool;
-use crate::JobSuccessType;
-
 
 pub struct SidekiqWorker<'a> {
     pub id: String,
@@ -39,18 +33,10 @@ pub struct SidekiqWorker<'a> {
 }
 
 impl<'a> SidekiqWorker<'a> {
-    pub fn new(server_id: &str,
-               pool: RedisPool,
-               tx: Sender<Signal>,
-               rx: Receiver<Operation>,
-               mut queues: Vec<String>,
-               queue_shuffle: bool,
-               handlers: BTreeMap<String, Box<dyn JobHandler>>,
-               middlewares: Vec<Box<dyn MiddleWare>>,
-               namespace: String,
-               pause_if: Option<fn() -> bool>)
-               -> SidekiqWorker<'a> {
-
+    pub fn new(
+        server_id: &str, pool: RedisPool, tx: Sender<Signal>, rx: Receiver<Operation>, mut queues: Vec<String>, queue_shuffle: bool,
+        handlers: BTreeMap<String, Box<dyn JobHandler>>, middlewares: Vec<Box<dyn MiddleWare>>, namespace: String, pause_if: Option<fn() -> bool>,
+    ) -> SidekiqWorker<'a> {
         let mut rng = rand::thread_rng();
         let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(6).collect();
 
@@ -117,7 +103,6 @@ impl<'a> SidekiqWorker<'a> {
         }
     }
 
-
     fn run_queue_once(&mut self) -> Result<bool> {
         if self.pause_if.map(|f| f()) == Some(true) {
             std::thread::sleep(Duration::from_secs(10));
@@ -148,7 +133,6 @@ impl<'a> SidekiqWorker<'a> {
         }
     }
 
-
     fn perform(&mut self, job: Job) -> Result<JobSuccessType> {
         debug!("{} {:?}", self.id, job);
 
@@ -159,7 +143,7 @@ impl<'a> SidekiqWorker<'a> {
             return Err("unknown job class".into());
         };
 
-        match catch_unwind(AssertUnwindSafe(|| { self.call_middleware(job, |job| handler.handle(job)) })) {
+        match catch_unwind(AssertUnwindSafe(|| self.call_middleware(job, |job| handler.handle(job)))) {
             Err(_) => {
                 error!("Worker '{}' panicked, recovering", self.id);
                 Err("Worker crashed".into())
@@ -169,27 +153,20 @@ impl<'a> SidekiqWorker<'a> {
     }
 
     fn call_middleware<F>(&mut self, mut job: Job, mut job_handle: F) -> Result<JobSuccessType>
-        where F: FnMut(&Job) -> JobHandlerResult
+    where
+        F: FnMut(&Job) -> JobHandlerResult,
     {
-        fn imp<'a, F: FnMut(&Job) -> JobHandlerResult>(job: &mut Job,
-                                                       redis: RedisPool,
-                                                       chain: &mut [Box<dyn MiddleWare + 'a>],
-                                                       job_handle: &mut F)
-                                                       -> Result<JobSuccessType> {
-            chain.split_first_mut()
-                .map(|(head, tail)| {
-                    head.handle(job,
-                                redis,
-                                &mut |job, redis| imp(job, redis, tail, job_handle))
-                })
+        fn imp<'a, F: FnMut(&Job) -> JobHandlerResult>(
+            job: &mut Job, redis: RedisPool, chain: &mut [Box<dyn MiddleWare + 'a>], job_handle: &mut F,
+        ) -> Result<JobSuccessType> {
+            chain
+                .split_first_mut()
+                .map(|(head, tail)| head.handle(job, redis, &mut |job, redis| imp(job, redis, tail, job_handle)))
                 .or_else(|| Some(job_handle(&job)))
                 .unwrap()
         }
 
-        imp(&mut job,
-            self.pool.clone(),
-            &mut self.middlewares,
-            &mut job_handle)
+        imp(&mut job, self.pool.clone(), &mut self.middlewares, &mut job_handle)
     }
 
     fn sync_state(&mut self) {
@@ -207,7 +184,6 @@ impl<'a> SidekiqWorker<'a> {
 
     // Sidekiq dashboard reporting functions
 
-
     fn report_working(&self, job: &Job) -> Result<()> {
         let mut conn = self.pool.get()?;
         let payload: JValue = json!({
@@ -215,24 +191,17 @@ impl<'a> SidekiqWorker<'a> {
             "payload": job,
             "run_at": Utc::now().timestamp()
         });
-        let _: () = Pipeline::new().hset(&self.with_namespace(&self.with_server_id("workers")),
-                  &self.id,
-                  to_string(&payload).unwrap())
+        let _: () = Pipeline::new()
+            .hset(&self.with_namespace(&self.with_server_id("workers")), &self.id, to_string(&payload).unwrap())
             .expire(&self.with_namespace(&self.with_server_id("workers")), 5)
             .query(&mut *conn)?;
 
         Ok(())
     }
 
-
     fn report_done(&self) -> Result<()> {
-        let _: () = self.pool
-            .get()?
-            .hdel(&self.with_namespace(&self.with_server_id("workers")),
-                  &self.id)?;
-        Ok(())
+        Ok(self.pool.get()?.hdel(&self.with_namespace(&self.with_server_id("workers")), &self.id)?)
     }
-
 
     fn with_namespace(&self, snippet: &str) -> String {
         if self.namespace == "" {
@@ -242,11 +211,9 @@ impl<'a> SidekiqWorker<'a> {
         }
     }
 
-
     fn with_server_id(&self, snippet: &str) -> String {
         self.server_id.clone() + ":" + snippet
     }
-
 
     fn queue_name(&self, name: &str) -> String {
         self.with_namespace(&("queue:".to_string() + name))

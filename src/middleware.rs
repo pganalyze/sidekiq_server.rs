@@ -1,12 +1,10 @@
-use serde_json::to_string;
-use chrono::Utc;
-use redis::Commands;
-
-use crate::RedisPool;
-use crate::JobSuccessType;
 use crate::errors::Result;
 use crate::job::{Job, RetryInfo};
-
+use crate::JobSuccessType;
+use crate::RedisPool;
+use chrono::Utc;
+use redis::Commands;
+use serde_json::to_string;
 
 pub type MiddleWareResult = Result<JobSuccessType>;
 pub type NextFunc<'a> = &'a mut (dyn FnMut(&mut Job, RedisPool) -> MiddleWareResult + 'a);
@@ -17,7 +15,8 @@ pub trait MiddleWare: Send {
 }
 
 impl<F> MiddleWare for F
-    where F: FnMut(&mut Job, RedisPool, NextFunc) -> MiddleWareResult + Copy + Send + 'static
+where
+    F: FnMut(&mut Job, RedisPool, NextFunc) -> MiddleWareResult + Copy + Send + 'static,
 {
     fn handle(&mut self, job: &mut Job, redis: RedisPool, next: NextFunc) -> MiddleWareResult {
         self(job, redis, next)
@@ -48,7 +47,8 @@ pub fn retry_middleware(job: &mut Job, redis: RedisPool, next: NextFunc) -> Midd
                         retry_count: retry_count + 1,
                         error_message: format!("{}", e),
                         error_class: "dummy".to_string(),
-                        error_backtrace: e.backtrace()
+                        error_backtrace: e
+                            .backtrace()
                             .map(|bt| {
                                 let s = format!("{:?}", bt);
                                 s.split('\n').map(|s| s.to_string()).collect()
@@ -67,10 +67,7 @@ pub fn retry_middleware(job: &mut Job, redis: RedisPool, next: NextFunc) -> Midd
     }
 }
 
-pub fn time_elapse_middleware(job: &mut Job,
-                              redis: RedisPool,
-                              next: NextFunc)
-                              -> MiddleWareResult {
+pub fn time_elapse_middleware(job: &mut Job, redis: RedisPool, next: NextFunc) -> MiddleWareResult {
     let j = job.clone();
     let now = Utc::now();
     let r = next(job, redis);

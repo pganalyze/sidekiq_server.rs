@@ -26,7 +26,8 @@ fn main() {
     env_logger::init();
     let params = Params::from_args();
 
-    let queues: Vec<_> = params.queues
+    let queues: Vec<_> = params
+        .queues
         .into_iter()
         .map(|v| {
             let mut sp = v.split(':');
