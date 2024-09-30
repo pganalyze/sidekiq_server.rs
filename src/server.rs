@@ -1,27 +1,20 @@
+use crate::errors::*;
+use crate::job_handler::JobHandler;
+use crate::middleware::MiddleWare;
+use crate::worker::SidekiqWorker;
+use crate::RedisPool;
+use chrono::Utc;
+use crossbeam_channel::{after, tick, Receiver, Sender};
+use gethostname::gethostname;
+use rand::{distributions, Rng};
+use redis::Pipeline;
+use serde_json::to_string;
+use signal_hook::consts::{SIGINT, SIGUSR1};
 use std::collections::{BTreeMap, HashSet};
 use std::iter;
-use std::time::Duration;
-
-use redis::Pipeline;
-
-use rand::{Rng, distributions};
-
-use threadpool::ThreadPool;
-
-use crossbeam_channel::{after, tick, Receiver, Sender};
-use signal_hook::consts::{SIGINT, SIGUSR1};
 use std::os::raw::c_int;
-
-use chrono::Utc;
-
-use serde_json::to_string;
-
-use crate::worker::SidekiqWorker;
-use crate::errors::*;
-use gethostname::gethostname;
-use crate::middleware::MiddleWare;
-use crate::job_handler::JobHandler;
-use crate::RedisPool;
+use std::time::Duration;
+use threadpool::ThreadPool;
 
 #[derive(Debug)]
 pub enum Signal {
@@ -59,9 +52,7 @@ impl<'a> SidekiqServer<'a> {
     pub fn new(redis: &str, concurrency: usize) -> Result<Self> {
         let signal_chan = signal_listen(&[SIGINT, SIGUSR1])?;
         let now = Utc::now();
-        let pool = r2d2::Pool::builder()
-            .max_size(concurrency as u32 + 3)
-            .build(redis::Client::open(redis)?)?;
+        let pool = r2d2::Pool::builder().max_size(concurrency as u32 + 3).build(redis::Client::open(redis)?)?;
 
         let mut rng = rand::thread_rng();
         let identity: Vec<u8> = iter::repeat(()).map(|()| rng.sample(distributions::Alphanumeric)).take(12).collect();
@@ -128,7 +119,7 @@ impl<'a> SidekiqServer<'a> {
                             break;
                         }
                         Ok(signal @ SIGINT) => {
-                            info!("{:?}: Force terminating", signal);                            
+                            info!("{:?}: Force terminating", signal);
                             self.terminate_forcely(tox2, rsx2);
                             break;
                         }
@@ -162,28 +153,25 @@ impl<'a> SidekiqServer<'a> {
 
     // Worker start/terminate functions
 
-
     fn launch_workers(&mut self, tsx: Sender<Signal>, rox: Receiver<Operation>) {
         while self.worker_info.len() < self.concurrency {
             self.launch_worker(tsx.clone(), rox.clone());
         }
     }
 
-
     fn launch_worker(&mut self, tsx: Sender<Signal>, rox: Receiver<Operation>) {
-        let worker = SidekiqWorker::new(&self.identity(),
-                                        self.redispool.clone(),
-                                        tsx,
-                                        rox,
-                                        self.queues.clone(),
-                                        self.queue_shuffle,
-                                        self.job_handlers
-                                            .iter_mut()
-                                            .map(|(k, v)| (k.clone(), v.cloned()))
-                                            .collect(),
-                                        self.middlewares.iter_mut().map(|v| v.cloned()).collect(),
-                                        self.namespace.clone(),
-                                        self.pause_if);
+        let worker = SidekiqWorker::new(
+            &self.identity(),
+            self.redispool.clone(),
+            tsx,
+            rox,
+            self.queues.clone(),
+            self.queue_shuffle,
+            self.job_handlers.iter_mut().map(|(k, v)| (k.clone(), v.cloned())).collect(),
+            self.middlewares.iter_mut().map(|v| v.cloned()).collect(),
+            self.namespace.clone(),
+            self.pause_if,
+        );
         self.worker_info.insert(worker.id.clone(), false);
         self.threadpool.execute(move || worker.work());
     }
@@ -218,7 +206,6 @@ impl<'a> SidekiqServer<'a> {
         }
     }
 
-
     fn terminate_gracefully(&mut self, tox: Sender<Operation>, rsx: Receiver<Signal>) {
         self.inform_termination(tox);
 
@@ -238,7 +225,6 @@ impl<'a> SidekiqServer<'a> {
             }
         }
     }
-
 
     fn deal_signal(&mut self, sig: Signal) -> Result<()> {
         debug!("dealing signal {:?}", sig);
@@ -264,26 +250,26 @@ impl<'a> SidekiqServer<'a> {
 
     // Sidekiq dashboard reporting functions
 
-
     fn report_alive(&mut self) -> Result<()> {
         let now = Utc::now();
         let queues: Vec<_> = self.queues.iter().collect::<HashSet<_>>().into_iter().collect();
-        let content = vec![("info",
-                            to_string(&json!({
-                                "hostname": self.hostname(),
-                                "started_at": self.started_at,
-                                "pid": self.pid,
-                                "concurrency": self.concurrency,
-                                "queues": queues,
-                                "labels": [],
-                                "identity": self.identity()
-                            }))
-                                .unwrap()),
-                           ("busy", self.worker_info.values().filter(|v| **v).count().to_string()),
-                           ("beat",
-                            (now.timestamp() as f64 +
-                             now.timestamp_subsec_micros() as f64 / 1000000f64)
-                                .to_string())];
+        let content = vec![
+            (
+                "info",
+                to_string(&json!({
+                    "hostname": self.hostname(),
+                    "started_at": self.started_at,
+                    "pid": self.pid,
+                    "concurrency": self.concurrency,
+                    "queues": queues,
+                    "labels": [],
+                    "identity": self.identity()
+                }))
+                .unwrap(),
+            ),
+            ("busy", self.worker_info.values().filter(|v| **v).count().to_string()),
+            ("beat", (now.timestamp() as f64 + now.timestamp_subsec_micros() as f64 / 1000000f64).to_string()),
+        ];
         let mut conn = self.redispool.get()?;
         Pipeline::new()
             .hset_multiple(self.with_namespace(&self.identity()), &content)
@@ -292,44 +278,37 @@ impl<'a> SidekiqServer<'a> {
             .query(&mut *conn)?;
 
         Ok(())
-
     }
-
 
     fn report_processed(&mut self, n: usize) -> Result<()> {
         let mut connection = self.redispool.get()?;
-        let _: () = Pipeline::new().incr(self.with_namespace(&format!("stat:processed:{}",
-                                               Utc::now().format("%Y-%m-%d"))),
-                  n)
+        let _: () = Pipeline::new()
+            .incr(self.with_namespace(&format!("stat:processed:{}", Utc::now().format("%Y-%m-%d"))), n)
             .incr(self.with_namespace(&format!("stat:processed")), n)
             .query(&mut *connection)?;
 
         Ok(())
     }
 
-
     fn report_failed(&mut self, n: usize) -> Result<()> {
         let mut connection = self.redispool.get()?;
         let _: () = Pipeline::new()
-            .incr(self.with_namespace(&format!("stat:failed:{}", Utc::now().format("%Y-%m-%d"))),
-                  n)
+            .incr(self.with_namespace(&format!("stat:failed:{}", Utc::now().format("%Y-%m-%d"))), n)
             .incr(self.with_namespace(&format!("stat:failed")), n)
             .query(&mut *connection)?;
         Ok(())
     }
 
-
     // OsStr -> Lossy UTF-8 | No errors
     fn hostname(&self) -> String {
         gethostname().to_string_lossy().into_owned()
     }
-    
+
     fn identity(&self) -> String {
         let pid = self.pid;
 
         self.hostname() + ":" + &pid.to_string() + ":" + &self.rs
     }
-
 
     fn with_namespace(&self, snippet: &str) -> String {
         if self.namespace == "" {

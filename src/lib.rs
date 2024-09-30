@@ -8,25 +8,24 @@ extern crate log;
 extern crate env_logger;
 #[macro_use]
 extern crate error_chain;
-extern crate threadpool;
-extern crate redis;
-extern crate rand;
 extern crate chrono;
+extern crate rand;
+extern crate redis;
+extern crate threadpool;
 #[macro_use]
 extern crate crossbeam_channel;
 
-mod server;
-mod job_handler;
 pub mod errors;
 mod job;
-mod worker;
+mod job_handler;
 mod middleware;
+mod server;
+mod worker;
 
-pub use server::SidekiqServer;
-pub use job_handler::{JobHandler, JobHandlerResult, printer_handler, error_handler, panic_handler};
-pub use middleware::{MiddleWare, MiddleWareResult, peek_middleware, retry_middleware,
-                     time_elapse_middleware, NextFunc};
 pub use job::{Job, RetryInfo};
+pub use job_handler::{error_handler, panic_handler, printer_handler, JobHandler, JobHandlerResult};
+pub use middleware::{peek_middleware, retry_middleware, time_elapse_middleware, MiddleWare, MiddleWareResult, NextFunc};
+pub use server::SidekiqServer;
 pub type RedisPool = r2d2::Pool<redis::Client>;
 
 #[derive(Debug, Clone)]

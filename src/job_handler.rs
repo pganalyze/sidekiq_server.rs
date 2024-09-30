@@ -1,7 +1,7 @@
+use crate::errors::{ErrorKind, Result};
 use crate::job::Job;
 use crate::JobSuccessType;
 use crate::JobSuccessType::*;
-use crate::errors::{ErrorKind, Result};
 
 pub type JobHandlerResult = Result<JobSuccessType>;
 
@@ -11,7 +11,8 @@ pub trait JobHandler: Send {
 }
 
 impl<F> JobHandler for F
-    where F: FnMut(&Job) -> JobHandlerResult + Copy + Send + 'static
+where
+    F: FnMut(&Job) -> JobHandlerResult + Copy + Send + 'static,
 {
     fn handle(&mut self, job: &Job) -> JobHandlerResult {
         self(job)

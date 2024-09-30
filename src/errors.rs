@@ -1,5 +1,6 @@
 use std::error::Error as StdError;
-error_chain!{
+
+error_chain! {
     foreign_links {
          RedisError(::redis::RedisError);
          JsonError(::serde_json::Error);
