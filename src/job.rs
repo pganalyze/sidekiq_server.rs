@@ -6,7 +6,7 @@ use serde::{Serialize, Deserialize, Serializer, Deserializer};
 use serde::de::Error;
 use serde::ser::SerializeMap;
 
-use chrono::{DateTime, Utc, NaiveDateTime};
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub enum BoolOrUSize {
@@ -192,8 +192,7 @@ impl<'a, D> JMapExt<'a, D> for JMap<String, JValue>
     fn remove_datetime(&mut self, key: &str) -> Result<DateTime<Utc>, D::Error> {
         self.remove(key)
             .and_then(|v| v.as_f64())
-            .and_then(|f| NaiveDateTime::from_timestamp_opt(f as i64, ((f - f.floor()) * 1e9) as u32))
-            .map(|t| DateTime::from_utc(t, Utc))
+            .and_then(|f| DateTime::from_timestamp(f as i64, ((f - f.floor()) * 1e9) as u32))
             .ok_or(D::Error::custom(format!("no member '{}'", key)))
     }
 
