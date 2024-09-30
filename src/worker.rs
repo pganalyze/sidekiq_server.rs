@@ -125,7 +125,7 @@ impl<'a> SidekiqWorker<'a> {
         }
 
         let queues: Vec<String> = self.queues.iter().map(|q| self.queue_name(q)).collect();
-        let result: Option<(String, String)> = self.pool.get()?.brpop(queues, 10)?;
+        let result: Option<(String, String)> = self.pool.get()?.brpop(queues, 10.0)?;
 
         if let Some((queue, job)) = result {
             debug!("{} job received for queue {}", self.id, queue);

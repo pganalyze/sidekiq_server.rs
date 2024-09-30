@@ -10,23 +10,23 @@ readme = "README.md"
 keywords = ["sidekiq", "worker", "resque", "ruby"]
 
 [dependencies]
-crossbeam-channel = "0.5.5"
-signal-hook = "0.3.14"
-chrono = { version = "0.4.22", default-features = false, features = ["serde", "clock"] }
-env_logger = "0.9.0"
-error-chain = "0.12.4" # 2 years since last release. consider replacing with a different crate
-log = "0.4.17"
-r2d2 = "0.8.10"
-rand = "0.8.5"
-redis = { version = "0.21.5", features = ["r2d2"] }
-serde = "1.0.137"
-serde_json = "1.0.81"
-threadpool = "1.8.1" # 2 years since last release. there is a 2.0 branch currently in development
-gethostname = "0.2.3"
+crossbeam-channel = "0.5"
+signal-hook = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+env_logger = "0.11"
+error-chain = "0.12"
+log = "0.4"
+r2d2 = "0.8"
+rand = "0.8"
+redis = { version = "0.27", features = ["r2d2"] }
+serde = "1.0"
+serde_json = "1.0"
+threadpool = "1.8"
+gethostname = "0.5"
 
 [dev-dependencies]
-structopt = "0.3.26"
-structopt-derive = "0.4.18"
+structopt = "0.3"
+structopt-derive = "0.4"
 
 [features]
 default = []
